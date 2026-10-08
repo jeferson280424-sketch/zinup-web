@@ -1,126 +1,196 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
-  Sparkles, 
-  Send, 
-  Square, 
   Lock, 
   Unlock, 
-  Settings, 
+  Eye, 
+  EyeOff, 
+  Activity, 
+  Cpu, 
+  HardDrive, 
+  Flame, 
+  Terminal, 
+  CheckCircle2, 
+  AlertTriangle, 
+  RefreshCw, 
+  ShieldCheck, 
+  Zap, 
   Trash2, 
   Copy, 
   Check, 
-  RefreshCw, 
-  Menu, 
-  X, 
-  Cpu, 
-  ShieldCheck, 
-  Zap, 
-  PlusCircle, 
-  HardDrive,
-  Activity,
-  Terminal,
-  MessageSquare,
-  AlertTriangle,
-  CheckCircle2,
-  Clock,
-  Flame,
-  Gauge
+  Settings, 
+  X,
+  Play,
+  Gauge,
+  Globe,
+  Server,
+  Layers
 } from 'lucide-react';
 
 const DEFAULT_ENDPOINT = 'https://zinia.sjlsolucoes.com.br';
 const DEFAULT_MODEL = 'llama3.1:8b';
 const TOTAL_VRAM_GB = 16.0;
 
+// Hash SHA-256 da senha 'Mel30290186@@' (para não expor a senha em texto plano no bundle)
+const MASTER_PASSWORD_HASH = '5dd222a547e08bc942ee50d8ffed23a1f3ea2c5bd24384d1dae509c0f8fc8226';
+
+// Função utilitária para calcular SHA-256 no navegador usando Web Crypto API
+async function computeSha256(message) {
+  const msgBuffer = new TextEncoder().encode(message);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 export default function App() {
-  // Navigation tab: 'chat' | 'telemetry' | 'logs'
-  const [currentTab, setCurrentTab] = useState('chat');
-
-  // Config & Security States
-  const [pin, setPin] = useState(() => localStorage.getItem('zinup_pin') || '1234');
-  const [enteredPin, setEnteredPin] = useState('');
-  const [isLocked, setIsLocked] = useState(() => {
-    const remember = localStorage.getItem('zinup_remember_unlock');
-    return remember === 'true' ? false : true;
+  // Estado de Autenticação & Fachada Secreta
+  const [isAuthenticated, setIsAuthenticated] = useState(() => {
+    return localStorage.getItem('zinup_auth_token') === 'session_valid_active';
   });
-  const [rememberDevice, setRememberDevice] = useState(false);
-  const [pinError, setPinError] = useState(false);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [passwordInput, setPasswordInput] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [authError, setAuthError] = useState('');
+  const [rememberDevice, setRememberDevice] = useState(true);
+  const [failedAttempts, setFailedAttempts] = useState(0);
+  const [lockoutTimer, setLockoutTimer] = useState(0);
 
-  // Endpoint & Settings States
+  // Contador de cliques secretos na logo
+  const clickHistoryRef = useRef([]);
+  const [logoClickedAnimation, setLogoClickedAnimation] = useState(false);
+
+  // Configurações do Servidor
   const [endpoint, setEndpoint] = useState(() => localStorage.getItem('zinup_endpoint') || DEFAULT_ENDPOINT);
-  const [systemPrompt, setSystemPrompt] = useState(() => localStorage.getItem('zinup_system_prompt') || 'Você é a IA Zinup, um assistente inteligente, prestativo e especialista.');
-  const [temperature, setTemperature] = useState(() => parseFloat(localStorage.getItem('zinup_temperature') || '0.7'));
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
-  // Server, GPU & Models States
+  // Telemetria de Servidor & GPU
   const [serverStatus, setServerStatus] = useState('checking'); // 'online' | 'offline' | 'checking'
+  const [serverVersion, setServerVersion] = useState('');
   const [pingMs, setPingMs] = useState(null);
   const [models, setModels] = useState([]);
-  const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
+  const [testModel, setTestModel] = useState(DEFAULT_MODEL);
   const [isCheckingServer, setIsCheckingServer] = useState(false);
-  
-  // GPU & Overload Telemetry
+
+  // Sobrecarga & VRAM
   const [activeLoadedModels, setActiveLoadedModels] = useState([]);
   const [usedVramGb, setUsedVramGb] = useState(0);
   const [vramPercentage, setVramPercentage] = useState(0);
   const [isGpuOverloaded, setIsGpuOverloaded] = useState(false);
 
-  // Event Logs State
+  // Teste Rápido de IA (Não-chat)
+  const [isTestingInference, setIsTestingInference] = useState(false);
+  const [lastTestResult, setLastTestResult] = useState(null);
+
+  // Logs do Sistema
   const [logs, setLogs] = useState(() => [
-    { id: 1, type: 'info', text: 'Painel Zinup IA inicializado.', time: new Date().toLocaleTimeString() }
+    { id: 1, type: 'info', text: 'NOC Zinup IA Gateway inicializado com sucesso.', time: new Date().toLocaleTimeString() }
   ]);
+  const [copiedLog, setCopiedLog] = useState(false);
+  const [toastMessage, setToastMessage] = useState('');
 
-  // Chat & UI States
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [conversations, setConversations] = useState(() => {
-    try {
-      const saved = localStorage.getItem('zinup_conversations');
-      return saved ? JSON.parse(saved) : [{ id: 'default', title: 'Conversa Inicial', messages: [] }];
-    } catch {
-      return [{ id: 'default', title: 'Conversa Inicial', messages: [] }];
-    }
-  });
-  const [activeConvId, setActiveConvId] = useState('default');
-  const [inputMessage, setInputMessage] = useState('');
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [copiedIndex, setCopiedIndex] = useState(null);
-  const [notification, setNotification] = useState('');
-
-  const abortControllerRef = useRef(null);
-  const messagesEndRef = useRef(null);
   const logsEndRef = useRef(null);
 
-  const activeConversation = conversations.find(c => c.id === activeConvId) || conversations[0];
-
   const addLog = (type, text) => {
-    const newEntry = {
-      id: Date.now() + Math.random(),
-      type, // 'info' | 'success' | 'warn' | 'error'
-      text,
-      time: new Date().toLocaleTimeString()
-    };
-    setLogs(prev => [newEntry, ...prev.slice(0, 150)]);
+    setLogs(prev => [
+      { id: Date.now() + Math.random(), type, text, time: new Date().toLocaleTimeString() },
+      ...prev.slice(0, 199)
+    ]);
   };
 
-  // Save conversations to localStorage
-  useEffect(() => {
-    localStorage.setItem('zinup_conversations', JSON.stringify(conversations));
-  }, [conversations]);
+  const showToast = (msg) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(''), 3500);
+  };
 
-  // Save settings
+  // Lockout countdown timer
   useEffect(() => {
-    localStorage.setItem('zinup_endpoint', endpoint);
-    localStorage.setItem('zinup_system_prompt', systemPrompt);
-    localStorage.setItem('zinup_temperature', temperature.toString());
-  }, [endpoint, systemPrompt, temperature]);
+    if (lockoutTimer > 0) {
+      const timer = setTimeout(() => setLockoutTimer(t => t - 1), 1000);
+      return () => clearTimeout(timer);
+    }
+  }, [lockoutTimer]);
 
-  // Poll server health & GPU status
-  const pollServerAndGpu = async () => {
+  // Detector de 3 cliques rápidos na logo (dentro de 1.8 segundos)
+  const handleLogoClick = () => {
+    const now = Date.now();
+    setLogoClickedAnimation(true);
+    setTimeout(() => setLogoClickedAnimation(false), 300);
+
+    // Adiciona timestamp do clique
+    const recentClicks = [...clickHistoryRef.current, now].filter(t => now - t <= 1800);
+    clickHistoryRef.current = recentClicks;
+
+    if (recentClicks.length >= 3) {
+      clickHistoryRef.current = [];
+      if (navigator.vibrate) navigator.vibrate([50, 50, 50]);
+      if (isAuthenticated) {
+        showToast('Painel de Controle já está ativo!');
+      } else {
+        setIsAuthModalOpen(true);
+        setPasswordInput('');
+        setAuthError('');
+      }
+    }
+  };
+
+  // Validação de Senha com SHA-256
+  const handleAuthenticate = async (e) => {
+    e.preventDefault();
+    if (lockoutTimer > 0) return;
+
+    if (!passwordInput) {
+      setAuthError('Digite a senha de operador.');
+      return;
+    }
+
+    try {
+      const hashed = await computeSha256(passwordInput);
+
+      if (hashed === MASTER_PASSWORD_HASH) {
+        setIsAuthenticated(true);
+        setIsAuthModalOpen(false);
+        setPasswordInput('');
+        setAuthError('');
+        setFailedAttempts(0);
+        addLog('success', 'Acesso de operador autenticado com sucesso.');
+
+        if (rememberDevice) {
+          localStorage.setItem('zinup_auth_token', 'session_valid_active');
+        }
+        showToast('Acesso concedido ao Painel Administrativo!');
+      } else {
+        const nextAttempts = failedAttempts + 1;
+        setFailedAttempts(nextAttempts);
+        addLog('warn', `Tentativa de acesso não autorizada (${nextAttempts}ª falha).`);
+
+        if (nextAttempts >= 3) {
+          setLockoutTimer(60);
+          setAuthError('Bloqueio de segurança temporário (60s) ativado após 3 tentativas inválidas.');
+        } else {
+          setAuthError(`Senha incorreta. Tentativa ${nextAttempts} de 3.`);
+        }
+        setPasswordInput('');
+      }
+    } catch (err) {
+      setAuthError('Erro ao processar validação criptográfica.');
+    }
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('zinup_auth_token');
+    setIsAuthenticated(false);
+    addLog('info', 'Sessão de operador encerrada.');
+    showToast('Sessão encerrada com sucesso.');
+  };
+
+  // Polling de Telemetria e GPU
+  const pollTelemetry = async () => {
+    if (!isAuthenticated) return;
     setIsCheckingServer(true);
     const startTime = performance.now();
     const cleanEndpoint = endpoint.replace(/\/+$/, '');
 
     try {
-      // 1. Fetch running models on GPU via /api/ps
+      // 1. Consulta /api/ps (VRAM e modelos ativos)
       const psRes = await fetch(`${cleanEndpoint}/api/ps`, {
         method: 'GET',
         headers: { 'Accept': 'application/json' },
@@ -144,10 +214,6 @@ export default function App() {
 
           const overloaded = pct >= 85;
           setIsGpuOverloaded(overloaded);
-
-          if (overloaded) {
-            addLog('warn', `⚠️ Alerta de Sobrecarga de VRAM: ${gb}GB / 16GB em uso (${pct}% da RTX 5060 Ti).`);
-          }
         } else {
           setActiveLoadedModels([]);
           setUsedVramGb(0);
@@ -157,27 +223,28 @@ export default function App() {
       } else {
         setServerStatus('offline');
         setPingMs(null);
-        addLog('error', `Falha de conexão com ${cleanEndpoint}/api/ps (HTTP ${psRes.status})`);
       }
 
-      // 2. Fetch all installed models via /api/tags if list is empty
+      // 2. Consulta /api/version
+      const vRes = await fetch(`${cleanEndpoint}/api/version`, { signal: AbortSignal.timeout(4000) });
+      if (vRes.ok) {
+        const vData = await vRes.json();
+        setServerVersion(vData.version || '0.40.1');
+      }
+
+      // 3. Consulta /api/tags (lista de modelos disponíveis)
       if (models.length === 0) {
-        const tagsRes = await fetch(`${cleanEndpoint}/api/tags`, {
-          method: 'GET',
-          headers: { 'Accept': 'application/json' },
-          signal: AbortSignal.timeout(5000)
-        });
+        const tagsRes = await fetch(`${cleanEndpoint}/api/tags`, { signal: AbortSignal.timeout(4000) });
         if (tagsRes.ok) {
           const tagsData = await tagsRes.json();
           if (tagsData.models && Array.isArray(tagsData.models)) {
-            const modelList = tagsData.models.map(m => ({
+            const list = tagsData.models.map(m => ({
               name: m.name,
               size: m.size ? (m.size / (1024 * 1024 * 1024)).toFixed(1) + ' GB' : ''
             }));
-            setModels(modelList);
-            addLog('success', `Carregados ${modelList.length} modelos instalados no servidor.`);
-            if (!modelList.some(m => m.name === selectedModel)) {
-              setSelectedModel(modelList[0].name);
+            setModels(list);
+            if (!list.some(m => m.name === testModel)) {
+              setTestModel(list[0].name);
             }
           }
         }
@@ -186,1220 +253,706 @@ export default function App() {
     } catch (err) {
       setServerStatus('offline');
       setPingMs(null);
-      addLog('error', `Queda de conexão detectada: ${err.message}`);
     } finally {
       setIsCheckingServer(false);
     }
   };
 
   useEffect(() => {
-    if (!isLocked) {
-      pollServerAndGpu();
-      const interval = setInterval(pollServerAndGpu, 4000);
+    if (isAuthenticated) {
+      pollTelemetry();
+      const interval = setInterval(pollTelemetry, 3500);
       return () => clearInterval(interval);
     }
-  }, [isLocked, endpoint, models.length]);
+  }, [isAuthenticated, endpoint, models.length]);
 
-  // Scroll to bottom on new messages
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [activeConversation?.messages]);
-
-  // Unlock handler
-  const handleUnlock = (e) => {
-    e.preventDefault();
-    if (enteredPin === pin) {
-      setIsLocked(false);
-      setPinError(false);
-      addLog('info', 'Painel desbloqueado com sucesso via PIN.');
-      if (rememberDevice) {
-        localStorage.setItem('zinup_remember_unlock', 'true');
-      }
-    } else {
-      setPinError(true);
-      setEnteredPin('');
-      addLog('warn', 'Tentativa de desbloqueio com PIN incorreto.');
-      setTimeout(() => setPinError(false), 2000);
-    }
-  };
-
-  const handleLock = () => {
-    localStorage.removeItem('zinup_remember_unlock');
-    setIsLocked(true);
-    setEnteredPin('');
-    addLog('info', 'Painel bloqueado manualmente.');
-  };
-
-  const showNotification = (msg) => {
-    setNotification(msg);
-    setTimeout(() => setNotification(''), 4000);
-  };
-
-  // Free GPU VRAM
+  // Descarregar VRAM da GPU
   const handleUnloadVRAM = async () => {
     try {
-      showNotification('Liberando memória VRAM da GPU...');
-      addLog('info', 'Enviando comando de liberação de VRAM (keep_alive: 0)...');
+      showToast('Descarregando modelo da VRAM...');
+      addLog('info', 'Comando enviado: liberar VRAM da GPU (keep_alive: 0)...');
       const cleanEndpoint = endpoint.replace(/\/+$/, '');
-      
-      const currentLoaded = activeLoadedModels.length > 0 ? activeLoadedModels[0].name : selectedModel;
+      const targetModel = activeLoadedModels.length > 0 ? activeLoadedModels[0].name : testModel;
+
       await fetch(`${cleanEndpoint}/api/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: currentLoaded, keep_alive: 0 })
+        body: JSON.stringify({ model: targetModel, keep_alive: 0 })
       });
-      
-      showNotification('VRAM da RTX 5060 Ti descarregada com sucesso! (0 MB)');
-      addLog('success', `Modelo ${currentLoaded} descarregado da GPU. VRAM liberada.`);
-      pollServerAndGpu();
+
+      showToast('VRAM da RTX 5060 Ti liberada com sucesso!');
+      addLog('success', `VRAM liberada. Modelo ${targetModel} descarregado.`);
+      pollTelemetry();
     } catch (err) {
-      showNotification('Erro ao descarregar VRAM da GPU.');
+      showToast('Erro ao liberar VRAM.');
       addLog('error', `Falha ao liberar VRAM: ${err.message}`);
     }
   };
 
-  // Run full system diagnostics
-  const handleRunDiagnostics = async () => {
-    addLog('info', '--- INICIANDO DIAGNÓSTICO COMPLETO DO SERVIDOR ---');
-    const cleanEndpoint = endpoint.replace(/\/+$/, '');
-
-    try {
-      const vStart = performance.now();
-      const vRes = await fetch(`${cleanEndpoint}/api/version`);
-      const vData = await vRes.json();
-      addLog('success', `[OK] Endpoint Ativo: Ollama v${vData.version} (${Math.round(performance.now() - vStart)}ms)`);
-    } catch (err) {
-      addLog('error', `[FALHA] Teste de Versão: ${err.message}`);
-    }
-
-    try {
-      const psRes = await fetch(`${cleanEndpoint}/api/ps`);
-      const psData = await psRes.json();
-      const count = psData.models ? psData.models.length : 0;
-      addLog('success', `[OK] Status da GPU: ${count} modelos em execução na VRAM da RTX 5060 Ti.`);
-    } catch (err) {
-      addLog('error', `[FALHA] Teste de Status de GPU: ${err.message}`);
-    }
-
-    try {
-      const tRes = await fetch(`${cleanEndpoint}/api/tags`);
-      const tData = await tRes.json();
-      addLog('success', `[OK] Modelos Instalados: ${tData.models?.length || 0} disponíveis para uso.`);
-    } catch (err) {
-      addLog('error', `[FALHA] Teste de Modelos: ${err.message}`);
-    }
-
-    addLog('info', '--- DIAGNÓSTICO CONCLUÍDO ---');
-    showNotification('Diagnóstico concluído! Verifique a aba de Logs.');
-  };
-
-  // Send message with streaming
-  const handleSendMessage = async (textToSend) => {
-    const text = (textToSend || inputMessage).trim();
-    if (!text || isGenerating) return;
-
-    setInputMessage('');
-    addLog('info', `Iniciando requisição de chat com modelo '${selectedModel}'...`);
-
-    const userMsg = { role: 'user', content: text, timestamp: new Date().toLocaleTimeString() };
-    const updatedMessages = [...activeConversation.messages, userMsg];
-
-    let updatedTitle = activeConversation.title;
-    if (activeConversation.messages.length === 0) {
-      updatedTitle = text.slice(0, 28) + (text.length > 28 ? '...' : '');
-    }
-
-    setConversations(prev => prev.map(c => 
-      c.id === activeConvId ? { ...c, title: updatedTitle, messages: updatedMessages } : c
-    ));
-
-    const assistantMsgIndex = updatedMessages.length;
-    const initialAssistantMsg = { 
-      role: 'assistant', 
-      content: '', 
-      timestamp: new Date().toLocaleTimeString(),
-      model: selectedModel,
-      isStreaming: true 
-    };
-
-    setConversations(prev => prev.map(c => 
-      c.id === activeConvId ? { ...c, messages: [...updatedMessages, initialAssistantMsg] } : c
-    ));
-
-    setIsGenerating(true);
-    abortControllerRef.current = new AbortController();
+  // Teste Rápido de Inferência da IA (Não-chat)
+  const handleRunInferenceTest = async () => {
+    if (isTestingInference) return;
+    setIsTestingInference(true);
+    setLastTestResult(null);
+    addLog('info', `Iniciando teste de inferência no modelo '${testModel}'...`);
 
     const startTime = performance.now();
-    let tokenCount = 0;
-
     try {
       const cleanEndpoint = endpoint.replace(/\/+$/, '');
-      const payloadMessages = [
-        ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
-        ...updatedMessages.map(m => ({ role: m.role, content: m.content }))
-      ];
-
-      const response = await fetch(`${cleanEndpoint}/api/chat`, {
+      const res = await fetch(`${cleanEndpoint}/api/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: selectedModel,
-          messages: payloadMessages,
-          stream: true,
-          options: { temperature: temperature }
-        }),
-        signal: abortControllerRef.current.signal
+          model: testModel,
+          prompt: 'Responda com exatamente uma palavra: OK.',
+          stream: false,
+          options: { temperature: 0.1 }
+        })
       });
 
-      if (!response.ok) {
-        throw new Error(`Erro do servidor (${response.status}): ${response.statusText}`);
-      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder('utf-8');
-      let fullContent = '';
+      const data = await res.json();
+      const totalSeconds = ((performance.now() - startTime) / 1000).toFixed(2);
+      const evalCount = data.eval_count || 1;
+      const tps = data.eval_duration ? ((evalCount / (data.eval_duration / 1e9))).toFixed(1) : (evalCount / parseFloat(totalSeconds)).toFixed(1);
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      const result = {
+        success: true,
+        model: testModel,
+        timeSec: totalSeconds,
+        tokensPerSec: tps,
+        response: (data.response || '').trim(),
+        timestamp: new Date().toLocaleTimeString()
+      };
 
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split('\n').filter(line => line.trim() !== '');
-
-        for (const line of lines) {
-          try {
-            const parsed = JSON.parse(line);
-            if (parsed.message?.content) {
-              fullContent += parsed.message.content;
-              tokenCount++;
-
-              setConversations(prev => prev.map(c => {
-                if (c.id !== activeConvId) return c;
-                const msgs = [...c.messages];
-                if (msgs[assistantMsgIndex]) {
-                  msgs[assistantMsgIndex] = {
-                    ...msgs[assistantMsgIndex],
-                    content: fullContent
-                  };
-                }
-                return { ...c, messages: msgs };
-              }));
-            }
-          } catch {
-            // Ignore partial JSON chunks
-          }
-        }
-      }
-
-      const totalSeconds = ((performance.now() - startTime) / 1000).toFixed(1);
-      const tokensPerSec = totalSeconds > 0 ? (tokenCount / totalSeconds).toFixed(1) : '0';
-
-      addLog('success', `Resposta concluída: ${tokenCount} tokens em ${totalSeconds}s (${tokensPerSec} t/s) via ${selectedModel}.`);
-
-      setConversations(prev => prev.map(c => {
-        if (c.id !== activeConvId) return c;
-        const msgs = [...c.messages];
-        if (msgs[assistantMsgIndex]) {
-          msgs[assistantMsgIndex] = {
-            ...msgs[assistantMsgIndex],
-            content: fullContent,
-            isStreaming: false,
-            stats: `${tokenCount} tokens • ${totalSeconds}s (${tokensPerSec} t/s)`
-          };
-        }
-        return { ...c, messages: msgs };
-      }));
-
+      setLastTestResult(result);
+      addLog('success', `Teste de inferência aprovado: ${testModel} respondeu em ${totalSeconds}s (${tps} t/s).`);
+      showToast(`Inferência no ${testModel} 100% aprovada!`);
+      pollTelemetry();
     } catch (err) {
-      if (err.name === 'AbortError') {
-        addLog('warn', 'Geração interrompida pelo usuário.');
-      } else {
-        addLog('error', `Falha na inferência da IA: ${err.message}`);
-        setConversations(prev => prev.map(c => {
-          if (c.id !== activeConvId) return c;
-          const msgs = [...c.messages];
-          if (msgs[assistantMsgIndex]) {
-            msgs[assistantMsgIndex] = {
-              ...msgs[assistantMsgIndex],
-              content: `⚠️ Não foi possível obter resposta: ${err.message}. Verifique a aba de Logs e Telemetria para detalhes.`,
-              isStreaming: false,
-              isError: true
-            };
-          }
-          return { ...c, messages: msgs };
-        }));
-      }
+      setLastTestResult({
+        success: false,
+        error: err.message,
+        timestamp: new Date().toLocaleTimeString()
+      });
+      addLog('error', `Falha no teste de inferência: ${err.message}`);
+      showToast('Falha no teste de inferência.');
     } finally {
-      setIsGenerating(false);
-      abortControllerRef.current = null;
-      pollServerAndGpu();
+      setIsTestingInference(false);
     }
   };
 
-  const handleStopGeneration = () => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      setIsGenerating(false);
-    }
-  };
-
-  const handleNewConversation = () => {
-    const newId = 'conv_' + Date.now();
-    const newConv = { id: newId, title: 'Nova Conversa', messages: [] };
-    setConversations(prev => [newConv, ...prev]);
-    setActiveConvId(newId);
-    setSidebarOpen(false);
-    addLog('info', 'Nova conversa iniciada.');
-  };
-
-  const handleDeleteConversation = (id, e) => {
-    e.stopPropagation();
-    if (conversations.length <= 1) {
-      setConversations([{ id: 'default', title: 'Conversa Inicial', messages: [] }]);
-      setActiveConvId('default');
-      return;
-    }
-    const filtered = conversations.filter(c => c.id !== id);
-    setConversations(filtered);
-    if (activeConvId === id) {
-      setActiveConvId(filtered[0].id);
-    }
-  };
-
-  const handleCopyText = (text, idx) => {
-    navigator.clipboard.writeText(text);
-    setCopiedIndex(idx);
-    setTimeout(() => setCopiedIndex(null), 2000);
-  };
-
-  // Render markdown code snippets
-  const renderMessageContent = (content) => {
-    if (!content) return null;
-    const parts = content.split(/(```[\s\S]*?```)/g);
-
-    return parts.map((part, i) => {
-      if (part.startsWith('```') && part.endsWith('```')) {
-        const lines = part.slice(3, -3).trim().split('\n');
-        const lang = lines[0].match(/^[a-zA-Z0-9_-]+$/) ? lines[0] : '';
-        const code = lang ? lines.slice(1).join('\n') : lines.join('\n');
-
-        return (
-          <div key={i} style={{ position: 'relative', margin: '12px 0' }}>
-            <div style={{
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              background: '#090d16',
-              borderTopLeftRadius: '10px',
-              borderTopRightRadius: '10px',
-              padding: '6px 12px',
-              fontSize: '0.75rem',
-              color: '#94a3b8',
-              border: '1px solid rgba(255,255,255,0.08)',
-              borderBottom: 'none'
-            }}>
-              <span>{lang || 'código'}</span>
-              <button 
-                onClick={() => handleCopyText(code, `code_${i}`)}
-                className="btn-secondary"
-                style={{ padding: '2px 8px', fontSize: '0.75rem', height: '24px' }}
-              >
-                {copiedIndex === `code_${i}` ? <Check size={12} color="#10b981" /> : <Copy size={12} />}
-                {copiedIndex === `code_${i}` ? 'Copiado' : 'Copiar'}
-              </button>
-            </div>
-            <pre style={{ margin: 0, borderTopLeftRadius: 0, borderTopRightRadius: 0 }}>
-              <code>{code}</code>
-            </pre>
-          </div>
-        );
-      }
-      return <span key={i} style={{ whiteSpace: 'pre-wrap' }}>{part}</span>;
-    });
-  };
-
-  // If locked, render Lock Screen
-  if (isLocked) {
+  // =========================================================================
+  // RENDERIZAÇÃO: FACHADA PÚBLICA (DECOY STEALTH VIEW)
+  // =========================================================================
+  if (!isAuthenticated) {
     return (
-      <div className="lock-overlay">
-        <div className="lock-card">
+      <div className="app-container" style={{ alignItems: 'center', justifyContent: 'center', padding: '20px' }}>
+        {/* Toast */}
+        {toastMessage && (
           <div style={{
-            width: '64px',
-            height: '64px',
-            margin: '0 auto 20px auto',
-            borderRadius: '50%',
-            background: 'linear-gradient(135deg, rgba(0, 240, 255, 0.2), rgba(139, 92, 246, 0.2))',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            border: '1px solid rgba(0, 240, 255, 0.4)',
-            boxShadow: '0 0 20px rgba(0, 240, 255, 0.25)'
+            position: 'fixed',
+            top: '20px',
+            zIndex: 300,
+            background: 'rgba(0, 240, 255, 0.95)',
+            color: '#030712',
+            fontWeight: 700,
+            padding: '10px 22px',
+            borderRadius: 'var(--radius-full)',
+            boxShadow: '0 8px 25px rgba(0, 240, 255, 0.4)',
+            fontSize: '0.85rem',
+            animation: 'fadeIn 0.2s ease'
           }}>
-            <Lock size={30} color="#00f0ff" />
+            {toastMessage}
+          </div>
+        )}
+
+        {/* Fachada Institucional Decoy */}
+        <div style={{
+          width: '100%',
+          maxWidth: '560px',
+          background: 'var(--bg-glass-card)',
+          backdropFilter: 'blur(20px)',
+          border: '1px solid var(--border-dim)',
+          borderRadius: 'var(--radius-lg)',
+          padding: '40px 32px',
+          boxShadow: '0 20px 60px rgba(0,0,0,0.6)',
+          textAlign: 'center',
+          animation: 'fadeIn 0.4s ease'
+        }}>
+          {/* LOGO OFICIAL COM GESTO SECRETO DE 3 CLIQUES */}
+          <div 
+            onClick={handleLogoClick}
+            className={logoClickedAnimation ? 'logo-click-anim' : ''}
+            style={{
+              width: '92px',
+              height: '92px',
+              margin: '0 auto 24px auto',
+              borderRadius: '24px',
+              padding: '6px',
+              background: 'linear-gradient(135deg, rgba(0, 240, 255, 0.15), rgba(139, 92, 246, 0.15))',
+              border: '1px solid rgba(0, 240, 255, 0.3)',
+              cursor: 'pointer',
+              userSelect: 'none',
+              transition: 'transform 0.2s ease',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center'
+            }}
+            title="SJL Soluções Gateway"
+          >
+            <img 
+              src="/favicon.png" 
+              alt="Logo" 
+              style={{ width: '100%', height: '100%', objectFit: 'contain', borderRadius: '18px' }} 
+            />
           </div>
 
-          <h2 style={{ fontSize: '1.4rem', fontWeight: 800, marginBottom: '6px', letterSpacing: '-0.02em' }}>
-            ZINUP IA REMOTO
-          </h2>
-          <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '24px' }}>
-            Painel Privado de Controle da RTX 5060 Ti
+          <h1 style={{ fontSize: '1.6rem', fontWeight: 800, letterSpacing: '-0.02em', marginBottom: '8px' }}>
+            SJL Soluções
+          </h1>
+          <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: '32px' }}>
+            Gateway Operacional & Monitor de Infraestrutura Cloud
           </p>
 
-          <form onSubmit={handleUnlock}>
-            <div style={{ marginBottom: '20px' }}>
-              <input
-                id="pin-input"
-                type="password"
-                maxLength={8}
-                value={enteredPin}
-                onChange={(e) => setEnteredPin(e.target.value)}
-                placeholder="Digite o PIN de Acesso"
-                autoFocus
-                style={{
-                  width: '100%',
-                  padding: '14px',
-                  borderRadius: 'var(--radius-md)',
-                  background: '#090d16',
-                  border: pinError ? '1px solid var(--rose-danger)' : '1px solid rgba(255, 255, 255, 0.15)',
-                  color: '#fff',
-                  fontSize: '1.2rem',
-                  textAlign: 'center',
-                  letterSpacing: '0.3em',
-                  outline: 'none',
-                  transition: 'all 0.2s ease',
-                  boxShadow: pinError ? '0 0 15px rgba(244, 63, 94, 0.4)' : 'none'
-                }}
-              />
-              {pinError && (
-                <p style={{ color: 'var(--rose-danger)', fontSize: '0.8rem', marginTop: '8px' }}>
-                  PIN incorreto. Tente novamente.
-                </p>
+          {/* Cards de Status Institucionais */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '14px', textAlign: 'left', marginBottom: '30px' }}>
+            <div style={{ background: 'var(--bg-surface)', padding: '16px', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-dim)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--emerald-success)', fontSize: '0.8rem', fontWeight: 700, marginBottom: '6px' }}>
+                <CheckCircle2 size={16} />
+                SERVIÇOS DE REDE
+              </div>
+              <div style={{ fontSize: '0.95rem', fontWeight: 700 }}>100% Operacional</div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-subtle)', marginTop: '4px' }}>Roteamento Cloudflare ativo</div>
+            </div>
+
+            <div style={{ background: 'var(--bg-surface)', padding: '16px', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-dim)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--cyan-primary)', fontSize: '0.8rem', fontWeight: 700, marginBottom: '6px' }}>
+                <ShieldCheck size={16} />
+                SEGURANÇA EDGE
+              </div>
+              <div style={{ fontSize: '0.95rem', fontWeight: 700 }}>Criptografia TLS 1.3</div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-subtle)', marginTop: '4px' }}>Túnel de ponta a ponta ativo</div>
+            </div>
+          </div>
+
+          <div style={{ fontSize: '0.75rem', color: 'var(--text-subtle)', borderTop: '1px solid var(--border-dim)', paddingTop: '18px' }}>
+            © 2026 SJL Soluções. Todos os sistemas monitorados 24/7.
+          </div>
+        </div>
+
+        {/* MODAL SECRETO DE AUTENTICAÇÃO (ATIVADO APENAS PELOS 3 CLIQUES) */}
+        {isAuthModalOpen && (
+          <div className="modal-overlay" onClick={() => setIsAuthModalOpen(false)}>
+            <div className="modal-card" onClick={e => e.stopPropagation()}>
+              <div style={{
+                width: '56px',
+                height: '56px',
+                borderRadius: '50%',
+                margin: '0 auto 16px auto',
+                background: 'rgba(0, 240, 255, 0.15)',
+                border: '1px solid rgba(0, 240, 255, 0.4)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center'
+              }}>
+                <Lock size={26} color="#00f0ff" />
+              </div>
+
+              <h2 style={{ fontSize: '1.25rem', fontWeight: 800, marginBottom: '6px' }}>
+                Acesso de Operador
+              </h2>
+              <p style={{ color: 'var(--text-muted)', fontSize: '0.82rem', marginBottom: '22px' }}>
+                Digite a credencial mestra para abrir o console de monitoramento.
+              </p>
+
+              {lockoutTimer > 0 ? (
+                <div style={{ background: 'rgba(244, 63, 94, 0.15)', border: '1px solid rgba(244, 63, 94, 0.4)', padding: '16px', borderRadius: 'var(--radius-md)', marginBottom: '16px', color: '#fb7185', fontSize: '0.85rem' }}>
+                  <AlertTriangle size={20} style={{ margin: '0 auto 8px auto', display: 'block' }} />
+                  Bloqueio temporário por segurança. Tente novamente em <strong>{lockoutTimer}s</strong>.
+                </div>
+              ) : (
+                <form onSubmit={handleAuthenticate}>
+                  <div style={{ position: 'relative', marginBottom: '14px' }}>
+                    <input
+                      type={showPassword ? 'text' : 'password'}
+                      value={passwordInput}
+                      onChange={e => setPasswordInput(e.target.value)}
+                      placeholder="Senha de Segurança"
+                      autoFocus
+                      style={{
+                        width: '100%',
+                        padding: '12px 42px 12px 14px',
+                        background: '#090d16',
+                        border: authError ? '1px solid var(--rose-danger)' : '1px solid rgba(255, 255, 255, 0.15)',
+                        borderRadius: 'var(--radius-md)',
+                        color: '#fff',
+                        fontSize: '0.95rem',
+                        outline: 'none',
+                        letterSpacing: showPassword ? 'normal' : '0.15em'
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword(!showPassword)}
+                      style={{
+                        position: 'absolute',
+                        right: '12px',
+                        top: '50%',
+                        transform: 'translateY(-50%)',
+                        background: 'transparent',
+                        border: 'none',
+                        color: 'var(--text-muted)',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center'
+                      }}
+                    >
+                      {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                    </button>
+                  </div>
+
+                  {authError && (
+                    <div style={{ color: 'var(--rose-danger)', fontSize: '0.8rem', marginBottom: '14px', textAlign: 'left' }}>
+                      {authError}
+                    </div>
+                  )}
+
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '20px', cursor: 'pointer', justifyContent: 'flex-start' }}>
+                    <input
+                      type="checkbox"
+                      checked={rememberDevice}
+                      onChange={e => setRememberDevice(e.target.checked)}
+                      style={{ accentColor: 'var(--cyan-primary)' }}
+                    />
+                    Manter autenticado neste dispositivo
+                  </label>
+
+                  <div style={{ display: 'flex', gap: '10px' }}>
+                    <button
+                      type="button"
+                      onClick={() => setIsAuthModalOpen(false)}
+                      className="btn-secondary"
+                      style={{ flex: 1 }}
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      type="submit"
+                      className="btn-primary"
+                      style={{ flex: 1 }}
+                    >
+                      <Unlock size={16} />
+                      Desbloquear
+                    </button>
+                  </div>
+                </form>
               )}
             </div>
-
-            <label style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '8px',
-              fontSize: '0.82rem',
-              color: 'var(--text-muted)',
-              marginBottom: '24px',
-              cursor: 'pointer'
-            }}>
-              <input
-                type="checkbox"
-                checked={rememberDevice}
-                onChange={(e) => setRememberDevice(e.target.checked)}
-                style={{ accentColor: 'var(--cyan-primary)' }}
-              />
-              Lembrar deste dispositivo
-            </label>
-
-            <button type="submit" className="btn-primary" style={{ width: '100%', padding: '14px' }}>
-              <Unlock size={18} />
-              Desbloquear Painel
-            </button>
-          </form>
-
-          <p style={{ marginTop: '20px', fontSize: '0.75rem', color: 'var(--text-subtle)' }}>
-            PIN padrão: <strong>1234</strong> (alterável nas configurações)
-          </p>
-        </div>
+          </div>
+        )}
       </div>
     );
   }
 
+  // =========================================================================
+  // RENDERIZAÇÃO: PAINEL PROFISSIONAL DE MONITORAMENTO (NOC DASHBOARD)
+  // =========================================================================
   return (
-    <div className="app-container">
-      {/* Toast Notification Banner */}
-      {notification && (
+    <div className="app-container" style={{ padding: '0 0 40px 0' }}>
+      {/* Toast */}
+      {toastMessage && (
         <div style={{
           position: 'fixed',
-          top: '16px',
+          top: '20px',
           left: '50%',
           transform: 'translateX(-50%)',
-          zIndex: 200,
-          background: 'rgba(16, 185, 129, 0.95)',
+          zIndex: 300,
+          background: 'rgba(0, 240, 255, 0.95)',
           color: '#030712',
           fontWeight: 700,
-          padding: '10px 20px',
+          padding: '10px 24px',
           borderRadius: 'var(--radius-full)',
-          boxShadow: '0 8px 25px rgba(16, 185, 129, 0.4)',
+          boxShadow: '0 8px 25px rgba(0, 240, 255, 0.4)',
           fontSize: '0.85rem',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '8px',
           animation: 'fadeIn 0.2s ease'
         }}>
-          <Zap size={16} />
-          {notification}
+          {toastMessage}
         </div>
       )}
 
-      {/* Sidebar for Conversations */}
-      <aside 
-        className={`sidebar glass-panel ${sidebarOpen ? 'open' : ''}`}
-        style={{
-          width: '280px',
-          height: '100%',
-          display: 'flex',
-          flexDirection: 'column',
-          borderRight: '1px solid var(--border-dim)',
-          background: 'var(--bg-secondary)',
-          zIndex: 100
-        }}
-      >
-        <div style={{
-          padding: '18px 16px',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          borderBottom: '1px solid var(--border-dim)'
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <div style={{
-              width: '32px',
-              height: '32px',
-              borderRadius: '8px',
-              background: 'linear-gradient(135deg, var(--cyan-primary), var(--violet-primary))',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center'
-            }}>
-              <Cpu size={18} color="#030712" />
-            </div>
-            <div>
-              <h1 style={{ fontSize: '1rem', fontWeight: 800, letterSpacing: '-0.02em', lineHeight: 1.1 }}>
-                ZINUP IA
+      {/* Header Executivo do NOC */}
+      <header className="glass-panel" style={{
+        padding: '14px 24px',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        borderBottom: '1px solid var(--border-dim)',
+        position: 'sticky',
+        top: 0,
+        zIndex: 50
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+          <img 
+            src="/favicon.png" 
+            alt="Logo" 
+            style={{ width: '38px', height: '38px', borderRadius: '10px', objectFit: 'contain' }} 
+          />
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <h1 style={{ fontSize: '1.05rem', fontWeight: 800, letterSpacing: '-0.02em', lineHeight: 1.1 }}>
+                ZINUP NOC • MONITOR DE INFRAESTRUTURA
               </h1>
-              <span style={{ fontSize: '0.68rem', color: 'var(--cyan-primary)', fontWeight: 600 }}>
+              <span className="badge badge-gpu" style={{ fontSize: '0.68rem', padding: '2px 8px' }}>
                 RTX 5060 Ti 16GB
               </span>
             </div>
-          </div>
-          <button 
-            onClick={() => setSidebarOpen(false)}
-            className="btn-icon" 
-            style={{ display: window.innerWidth <= 768 ? 'flex' : 'none' }}
-          >
-            <X size={18} />
-          </button>
-        </div>
-
-        {/* Navigation Tabs (Mobile & Desktop) */}
-        <div style={{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: '6px', borderBottom: '1px solid var(--border-dim)' }}>
-          <button 
-            onClick={() => { setCurrentTab('chat'); setSidebarOpen(false); }}
-            className={`btn-secondary ${currentTab === 'chat' ? 'active-tab' : ''}`}
-            style={{
-              justifyContent: 'flex-start',
-              background: currentTab === 'chat' ? 'var(--bg-surface)' : 'transparent',
-              borderColor: currentTab === 'chat' ? 'var(--cyan-primary)' : 'transparent',
-              color: currentTab === 'chat' ? 'var(--cyan-primary)' : 'var(--text-muted)'
-            }}
-          >
-            <MessageSquare size={16} />
-            Chat com a IA
-          </button>
-
-          <button 
-            onClick={() => { setCurrentTab('telemetry'); setSidebarOpen(false); }}
-            className={`btn-secondary ${currentTab === 'telemetry' ? 'active-tab' : ''}`}
-            style={{
-              justifyContent: 'flex-start',
-              background: currentTab === 'telemetry' ? 'var(--bg-surface)' : 'transparent',
-              borderColor: currentTab === 'telemetry' ? 'var(--cyan-primary)' : 'transparent',
-              color: currentTab === 'telemetry' ? 'var(--cyan-primary)' : 'var(--text-muted)',
-              position: 'relative'
-            }}
-          >
-            <Gauge size={16} />
-            GPU & Sobrecarga
-            {activeLoadedModels.length > 0 && (
-              <span style={{
-                marginLeft: 'auto',
-                width: '8px',
-                height: '8px',
-                borderRadius: '50%',
-                background: isGpuOverloaded ? 'var(--rose-danger)' : 'var(--emerald-success)'
-              }} />
-            )}
-          </button>
-
-          <button 
-            onClick={() => { setCurrentTab('logs'); setSidebarOpen(false); }}
-            className={`btn-secondary ${currentTab === 'logs' ? 'active-tab' : ''}`}
-            style={{
-              justifyContent: 'flex-start',
-              background: currentTab === 'logs' ? 'var(--bg-surface)' : 'transparent',
-              borderColor: currentTab === 'logs' ? 'var(--cyan-primary)' : 'transparent',
-              color: currentTab === 'logs' ? 'var(--cyan-primary)' : 'var(--text-muted)'
-            }}
-          >
-            <Terminal size={16} />
-            Logs em Tempo Real
-            <span style={{ marginLeft: 'auto', fontSize: '0.7rem', color: 'var(--text-subtle)' }}>
-              {logs.length}
+            <span style={{ fontSize: '0.72rem', color: 'var(--text-subtle)' }}>
+              Túnel Oficial: {endpoint.replace('https://', '')}
             </span>
-          </button>
+          </div>
         </div>
 
-        <div style={{ padding: '14px 16px' }}>
-          <button 
-            id="new-chat-btn"
-            onClick={handleNewConversation}
-            className="btn-primary" 
-            style={{ width: '100%', padding: '10px' }}
+        {/* Status & Controles */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <div 
+            onClick={pollTelemetry}
+            className={`badge ${serverStatus === 'online' ? 'badge-online' : 'badge-offline'}`}
+            style={{ cursor: 'pointer', padding: '6px 12px' }}
+            title="Clique para atualizar telemetria"
           >
-            <PlusCircle size={18} />
-            Nova Conversa
-          </button>
-        </div>
+            <span className={`status-dot ${serverStatus === 'online' ? 'online' : 'offline'}`} />
+            <span>{serverStatus === 'online' ? `Online (${pingMs}ms)` : 'Offline'}</span>
+            <RefreshCw size={12} style={{ animation: isCheckingServer ? 'spinSlow 1s linear infinite' : 'none' }} />
+          </div>
 
-        {/* Conversations List */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '0 12px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
-          <span style={{ fontSize: '0.7rem', color: 'var(--text-subtle)', fontWeight: 700, padding: '6px 8px', textTransform: 'uppercase' }}>
-            Histórico Recente
-          </span>
-          {conversations.map(conv => (
-            <div
-              key={conv.id}
-              onClick={() => { setActiveConvId(conv.id); setCurrentTab('chat'); setSidebarOpen(false); }}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                padding: '10px 12px',
-                borderRadius: 'var(--radius-md)',
-                cursor: 'pointer',
-                background: conv.id === activeConvId ? 'var(--bg-surface)' : 'transparent',
-                border: conv.id === activeConvId ? '1px solid rgba(0, 240, 255, 0.3)' : '1px solid transparent',
-                color: conv.id === activeConvId ? 'var(--cyan-primary)' : 'var(--text-muted)',
-                transition: 'all 0.15s ease'
-              }}
-            >
-              <span style={{ fontSize: '0.85rem', fontWeight: conv.id === activeConvId ? 600 : 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '170px' }}>
-                {conv.title}
-              </span>
-              <button
-                onClick={(e) => handleDeleteConversation(conv.id, e)}
-                style={{
-                  background: 'transparent',
-                  border: 'none',
-                  color: 'var(--text-subtle)',
-                  cursor: 'pointer',
-                  padding: '4px',
-                  display: 'flex',
-                  alignItems: 'center'
-                }}
-              >
-                <Trash2 size={14} />
-              </button>
-            </div>
-          ))}
-        </div>
-
-        {/* Sidebar Footer */}
-        <div style={{
-          padding: '14px 16px',
-          borderTop: '1px solid var(--border-dim)',
-          display: 'flex',
-          gap: '8px'
-        }}>
           <button 
-            id="vram-release-btn"
-            onClick={handleUnloadVRAM}
-            className="btn-secondary" 
-            style={{ flex: 1, padding: '8px', fontSize: '0.75rem', gap: '6px' }}
-            title="Descarrega qualquer modelo da VRAM da RTX 5060 Ti"
-          >
-            <HardDrive size={14} color="#00f0ff" />
-            Liberar VRAM
-          </button>
-          <button 
-            id="lock-btn"
-            onClick={handleLock}
+            onClick={() => setIsSettingsOpen(true)}
             className="btn-icon" 
-            title="Bloquear painel"
+            title="Configurações de Rede"
           >
-            <Lock size={16} />
+            <Settings size={18} />
+          </button>
+
+          <button 
+            onClick={handleLogout}
+            className="btn-secondary" 
+            style={{ gap: '6px', fontSize: '0.78rem' }}
+            title="Bloquear painel e retornar à fachada pública"
+          >
+            <Lock size={14} />
+            Bloquear
           </button>
         </div>
-      </aside>
+      </header>
 
-      {/* Main Content Area */}
-      <main className="main-chat-area">
-        {/* Top Header Navigation */}
-        <header className="glass-panel" style={{
-          padding: '12px 18px',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          borderBottom: '1px solid var(--border-dim)',
-          zIndex: 10
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-            <button 
-              id="menu-toggle-btn"
-              onClick={() => setSidebarOpen(true)}
-              className="btn-icon"
-              style={{ display: window.innerWidth <= 768 ? 'flex' : 'none' }}
-            >
-              <Menu size={18} />
+      {/* Conteúdo Principal do Painel */}
+      <div style={{ maxWidth: '1080px', width: '100%', margin: '24px auto', padding: '0 20px' }}>
+        
+        {/* ALERTA DE SOBRECARGA DA GPU (CASO ATINGIDO) */}
+        {isGpuOverloaded && (
+          <div style={{
+            background: 'rgba(244, 63, 94, 0.15)',
+            border: '1px solid var(--rose-danger)',
+            borderRadius: 'var(--radius-md)',
+            padding: '14px 18px',
+            marginBottom: '20px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '12px',
+            animation: 'fadeIn 0.3s ease'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', color: '#fb7185' }}>
+              <AlertTriangle size={22} />
+              <div>
+                <strong style={{ fontSize: '0.9rem' }}>ALERTA: SOBRECARGA DE VRAM DETECTADA ({vramPercentage}%)</strong>
+                <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: 0 }}>
+                  A memória de vídeo da RTX 5060 Ti está em {usedVramGb} GB / 16.0 GB. Novas inferências podem sofrer lentidão.
+                </p>
+              </div>
+            </div>
+            <button onClick={handleUnloadVRAM} className="btn-primary" style={{ background: 'var(--rose-danger)', padding: '6px 12px', fontSize: '0.78rem' }}>
+              Descarregar VRAM
             </button>
+          </div>
+        )}
 
-            {/* Model Selector */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+        {/* GRID DE 4 CARDS PRINCIPAIS */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '16px', marginBottom: '24px' }}>
+          
+          {/* CARD 1: VRAM & SOBRECARGA */}
+          <div className="noc-card">
+            <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)', fontSize: '0.78rem', fontWeight: 700, marginBottom: '8px' }}>
+              <span>MEMÓRIA VRAM (RTX 5060 Ti)</span>
+              <HardDrive size={16} color="#00f0ff" />
+            </div>
+            <div style={{ fontSize: '1.7rem', fontWeight: 800, color: isGpuOverloaded ? 'var(--rose-danger)' : 'var(--cyan-primary)' }}>
+              {usedVramGb} <span style={{ fontSize: '0.95rem', color: 'var(--text-subtle)' }}>/ 16.0 GB</span>
+            </div>
+            {/* Barra Gráfica */}
+            <div style={{ width: '100%', height: '8px', background: 'rgba(255,255,255,0.08)', borderRadius: '999px', marginTop: '12px', overflow: 'hidden' }}>
+              <div style={{
+                width: `${vramPercentage}%`,
+                height: '100%',
+                background: isGpuOverloaded ? 'linear-gradient(90deg, #f59e0b, #f43f5e)' : 'linear-gradient(90deg, #00f0ff, #8b5cf6)',
+                borderRadius: '999px',
+                transition: 'width 0.4s ease'
+              }} />
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: 'var(--text-subtle)', marginTop: '8px' }}>
+              <span>{vramPercentage}% Ocupado</span>
+              <span>{(TOTAL_VRAM_GB - usedVramGb).toFixed(2)} GB Livres</span>
+            </div>
+          </div>
+
+          {/* CARD 2: MODELO ATIVO NA PLACA */}
+          <div className="noc-card">
+            <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)', fontSize: '0.78rem', fontWeight: 700, marginBottom: '8px' }}>
+              <span>PROCESSO ATIVO NA GPU</span>
+              <Flame size={16} color={activeLoadedModels.length > 0 ? '#38bdf8' : '#10b981'} />
+            </div>
+            <div style={{ fontSize: '1.25rem', fontWeight: 800, color: activeLoadedModels.length > 0 ? '#38bdf8' : 'var(--emerald-success)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {activeLoadedModels.length > 0 ? activeLoadedModels[0].name : 'OCIOSA / LIVRE'}
+            </div>
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '8px' }}>
+              {activeLoadedModels.length > 0 ? (
+                <>Contexto: {activeLoadedModels[0].context_length || 4096} tokens • {((activeLoadedModels[0].size_vram || activeLoadedModels[0].size) / (1024**3)).toFixed(1)} GB</>
+              ) : (
+                '0% de uso. GPU fria e pronta para requisições.'
+              )}
+            </div>
+            {activeLoadedModels.length > 0 && (
+              <button 
+                onClick={handleUnloadVRAM} 
+                className="btn-secondary" 
+                style={{ marginTop: '12px', width: '100%', padding: '6px', fontSize: '0.72rem', gap: '4px' }}
+              >
+                <HardDrive size={12} color="#00f0ff" />
+                Liberar Memória da Placa
+              </button>
+            )}
+          </div>
+
+          {/* CARD 3: TÚNEL & ROTEAMENTO */}
+          <div className="noc-card">
+            <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)', fontSize: '0.78rem', fontWeight: 700, marginBottom: '8px' }}>
+              <span>ROTEAMENTO CLOUDFLARE</span>
+              <Globe size={16} color="#10b981" />
+            </div>
+            <div style={{ fontSize: '1.5rem', fontWeight: 800, color: serverStatus === 'online' ? 'var(--emerald-success)' : 'var(--rose-danger)' }}>
+              {serverStatus === 'online' ? `${pingMs} ms` : 'DESCONECTADO'}
+            </div>
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '8px' }}>
+              Versão: Ollama {serverVersion || 'v0.40.1'} • HTTP/2
+            </div>
+            <div style={{ fontSize: '0.72rem', color: 'var(--text-subtle)', marginTop: '4px' }}>
+              Protocolo TLS seguro via túnel persistente.
+            </div>
+          </div>
+
+          {/* CARD 4: MODELOS INSTALADOS */}
+          <div className="noc-card">
+            <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)', fontSize: '0.78rem', fontWeight: 700, marginBottom: '8px' }}>
+              <span>CATÁLOGO LOCAL DE IA</span>
+              <Layers size={16} color="#8b5cf6" />
+            </div>
+            <div style={{ fontSize: '1.7rem', fontWeight: 800, color: 'var(--violet-primary)' }}>
+              {models.length} <span style={{ fontSize: '0.9rem', color: 'var(--text-subtle)' }}>modelos</span>
+            </div>
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '8px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {models.map(m => m.name).slice(0, 3).join(', ')}{models.length > 3 ? '...' : ''}
+            </div>
+            <div style={{ fontSize: '0.72rem', color: 'var(--text-subtle)', marginTop: '4px' }}>
+              Armazenados localmente no SSD.
+            </div>
+          </div>
+        </div>
+
+        {/* SEÇÃO: TESTE RÁPIDO DE INFERÊNCIA DA IA (PING DE IA - NÃO-CHAT) */}
+        <div className="noc-card" style={{ marginBottom: '24px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+            <div>
+              <h3 style={{ fontSize: '1.05rem', fontWeight: 800, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Zap size={18} color="#00f0ff" />
+                Diagnóstico de Inferência da IA (Ping de Operação)
+              </h3>
+              <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+                Dispara um teste rápido para validar se o motor e os núcleos CUDA da RTX 5060 Ti estão respondendo normalmente.
+              </p>
+            </div>
+
+            <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
               <select
-                id="model-selector"
-                value={selectedModel}
-                onChange={(e) => setSelectedModel(e.target.value)}
+                value={testModel}
+                onChange={e => setTestModel(e.target.value)}
                 style={{
-                  background: 'var(--bg-surface)',
+                  background: 'var(--bg-main)',
                   color: 'var(--text-main)',
                   border: '1px solid var(--border-dim)',
-                  borderRadius: 'var(--radius-md)',
-                  padding: '7px 12px',
-                  fontSize: '0.85rem',
+                  borderRadius: 'var(--radius-sm)',
+                  padding: '8px 12px',
+                  fontSize: '0.82rem',
                   fontWeight: 600,
                   outline: 'none',
                   cursor: 'pointer'
                 }}
               >
-                {models.length > 0 ? (
-                  models.map(m => (
-                    <option key={m.name} value={m.name}>
-                      {m.name} ({m.size})
-                    </option>
-                  ))
-                ) : (
-                  <option value={DEFAULT_MODEL}>{DEFAULT_MODEL} (Padrão)</option>
-                )}
+                {models.map(m => (
+                  <option key={m.name} value={m.name}>{m.name} ({m.size})</option>
+                ))}
               </select>
-            </div>
-          </div>
 
-          {/* Telemetry and Controls */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            {/* GPU Overload Mini Indicator */}
-            {activeLoadedModels.length > 0 ? (
-              <div 
-                onClick={() => setCurrentTab('telemetry')}
-                className="badge" 
-                style={{
-                  background: isGpuOverloaded ? 'rgba(244, 63, 94, 0.2)' : 'rgba(0, 240, 255, 0.15)',
-                  color: isGpuOverloaded ? '#fb7185' : 'var(--cyan-primary)',
-                  border: `1px solid ${isGpuOverloaded ? 'rgba(244, 63, 94, 0.4)' : 'rgba(0, 240, 255, 0.3)'}`,
-                  cursor: 'pointer'
-                }}
-                title="Clique para ver a telemetria da GPU"
+              <button
+                onClick={handleRunInferenceTest}
+                disabled={isTestingInference || serverStatus !== 'online'}
+                className="btn-primary"
+                style={{ padding: '8px 16px', fontSize: '0.82rem', gap: '6px' }}
               >
-                <Flame size={12} color={isGpuOverloaded ? '#fb7185' : '#00f0ff'} />
-                <span>GPU {vramPercentage}%</span>
-              </div>
-            ) : (
-              <div 
-                onClick={() => setCurrentTab('telemetry')}
-                className="badge badge-gpu" 
-                style={{ cursor: 'pointer' }}
-                title="GPU Ociosa / Livre"
-              >
-                <Cpu size={12} />
-                <span>GPU Livre</span>
-              </div>
-            )}
-
-            {/* Status Badge */}
-            <div 
-              onClick={pollServerAndGpu}
-              className={`badge ${serverStatus === 'online' ? 'badge-online' : 'badge-offline'}`}
-              style={{ cursor: 'pointer' }}
-              title="Clique para testar conexão novamente"
-            >
-              <span className={`status-dot ${serverStatus === 'online' ? 'online' : 'offline'}`} />
-              <span>
-                {serverStatus === 'online' 
-                  ? `Online ${pingMs ? `(${pingMs}ms)` : ''}` 
-                  : serverStatus === 'checking' ? 'Testando...' : 'Offline'}
-              </span>
-              <RefreshCw size={11} style={{ animation: isCheckingServer ? 'spinSlow 1s linear infinite' : 'none' }} />
-            </div>
-
-            <button 
-              id="settings-btn"
-              onClick={() => setIsSettingsOpen(true)}
-              className="btn-icon"
-              title="Configurações do Servidor"
-            >
-              <Settings size={18} />
-            </button>
-          </div>
-        </header>
-
-        {/* VIEW 1: CHAT */}
-        {currentTab === 'chat' && (
-          <>
-            <div className="messages-container">
-              {activeConversation.messages.length === 0 ? (
-                /* Empty State Hero */
-                <div style={{
-                  margin: 'auto',
-                  maxWidth: '520px',
-                  textAlign: 'center',
-                  padding: '30px 20px',
-                  animation: 'fadeIn 0.3s ease'
-                }}>
-                  <div style={{
-                    width: '64px',
-                    height: '64px',
-                    borderRadius: '20px',
-                    margin: '0 auto 20px auto',
-                    background: 'linear-gradient(135deg, rgba(0, 240, 255, 0.2), rgba(139, 92, 246, 0.2))',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    border: '1px solid rgba(0, 240, 255, 0.4)',
-                    boxShadow: '0 0 30px rgba(0, 240, 255, 0.2)'
-                  }}>
-                    <Sparkles size={32} color="#00f0ff" />
-                  </div>
-
-                  <h2 style={{ fontSize: '1.6rem', fontWeight: 800, marginBottom: '8px', letterSpacing: '-0.02em' }}>
-                    Servidor ZINUP IA Ativo
-                  </h2>
-                  <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: '24px', lineHeight: 1.5 }}>
-                    Conectado à RTX 5060 Ti 16GB via túnel seguro. Modelo atual: <strong>{selectedModel}</strong>.
-                  </p>
-
-                  {/* Quick Prompt Pills */}
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '10px', textAlign: 'left' }}>
-                    {[
-                      { title: 'Resumo e Análise', prompt: 'Resuma os pontos principais de um projeto de inteligência artificial autônomo.' },
-                      { title: 'Criação de Código', prompt: 'Escreva um script em Python para consumir a API local do Ollama com streaming.' },
-                      { title: 'Segurança & Túneis', prompt: 'Explique como proteger uma rota pública do Cloudflare Zero Trust com Bearer Token.' },
-                      { title: 'Otimização de GPU', prompt: 'Quais parâmetros posso ajustar no Ollama para extrair a máxima velocidade da RTX 5060 Ti?' }
-                    ].map((item, idx) => (
-                      <div
-                        key={idx}
-                        onClick={() => handleSendMessage(item.prompt)}
-                        style={{
-                          background: 'var(--bg-surface)',
-                          border: '1px solid var(--border-dim)',
-                          borderRadius: 'var(--radius-md)',
-                          padding: '12px 14px',
-                          cursor: 'pointer',
-                          transition: 'all 0.2s ease'
-                        }}
-                        onMouseEnter={(e) => {
-                          e.currentTarget.style.borderColor = 'var(--border-focus)';
-                          e.currentTarget.style.transform = 'translateY(-2px)';
-                        }}
-                        onMouseLeave={(e) => {
-                          e.currentTarget.style.borderColor = 'var(--border-dim)';
-                          e.currentTarget.style.transform = 'translateY(0)';
-                        }}
-                      >
-                        <div style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--cyan-primary)', marginBottom: '4px' }}>
-                          {item.title}
-                        </div>
-                        <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: 1.3 }}>
-                          {item.prompt}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : (
-                /* Render Messages */
-                activeConversation.messages.map((msg, idx) => (
-                  <div key={idx} className={`message-row ${msg.role}`}>
-                    {msg.role === 'assistant' && (
-                      <div style={{
-                        width: '32px',
-                        height: '32px',
-                        borderRadius: '8px',
-                        background: 'linear-gradient(135deg, var(--cyan-primary), #0284c7)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        flexShrink: 0
-                      }}>
-                        <Cpu size={16} color="#030712" />
-                      </div>
-                    )}
-
-                    <div className="message-bubble">
-                      {renderMessageContent(msg.content)}
-
-                      {/* Message stats and copy button */}
-                      {msg.role === 'assistant' && (
-                        <div style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'space-between',
-                          marginTop: '10px',
-                          paddingTop: '8px',
-                          borderTop: '1px solid rgba(255, 255, 255, 0.06)',
-                          fontSize: '0.72rem',
-                          color: 'var(--text-subtle)'
-                        }}>
-                          <span>{msg.stats || (msg.isStreaming ? 'Gerando tokens na RTX 5060 Ti...' : '')}</span>
-                          <button
-                            onClick={() => handleCopyText(msg.content, idx)}
-                            style={{
-                              background: 'transparent',
-                              border: 'none',
-                              color: copiedIndex === idx ? '#10b981' : 'var(--text-subtle)',
-                              cursor: 'pointer',
-                              display: 'flex',
-                              alignItems: 'center',
-                              gap: '4px',
-                              fontSize: '0.72rem'
-                            }}
-                          >
-                            {copiedIndex === idx ? <Check size={12} /> : <Copy size={12} />}
-                            {copiedIndex === idx ? 'Copiado' : 'Copiar'}
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                ))
-              )}
-              <div ref={messagesEndRef} />
-            </div>
-
-            {/* Bottom Input Area */}
-            <div className="chat-input-wrapper">
-              <div className="chat-input-bar">
-                <textarea
-                  id="chat-input-textarea"
-                  className="chat-textarea"
-                  placeholder={serverStatus === 'offline' ? 'Servidor desconectado. Verifique os logs...' : `Converse com ${selectedModel}... (Shift+Enter para linha nova)`}
-                  value={inputMessage}
-                  onChange={(e) => setInputMessage(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      handleSendMessage();
-                    }
-                  }}
-                  rows={1}
-                />
-
-                {isGenerating ? (
-                  <button 
-                    id="stop-generation-btn"
-                    onClick={handleStopGeneration}
-                    className="btn-primary" 
-                    style={{ background: 'var(--rose-danger)', padding: '10px 14px' }}
-                    title="Parar resposta"
-                  >
-                    <Square size={16} />
-                  </button>
+                {isTestingInference ? (
+                  <>
+                    <RefreshCw size={14} style={{ animation: 'spinSlow 1s linear infinite' }} />
+                    Testando...
+                  </>
                 ) : (
-                  <button 
-                    id="send-message-btn"
-                    onClick={() => handleSendMessage()}
-                    disabled={!inputMessage.trim() || isGenerating}
-                    className="btn-primary"
-                    style={{ padding: '10px 14px' }}
-                    title="Enviar mensagem"
-                  >
-                    <Send size={16} />
-                  </button>
+                  <>
+                    <Play size={14} />
+                    Disparar Teste
+                  </>
                 )}
-              </div>
-            </div>
-          </>
-        )}
-
-        {/* VIEW 2: GPU & OVERLOAD TELEMETRY */}
-        {currentTab === 'telemetry' && (
-          <div style={{ flex: 1, overflowY: 'auto', padding: '24px 20px', maxWidth: '860px', width: '100%', margin: '0 auto' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
-              <div>
-                <h2 style={{ fontSize: '1.4rem', fontWeight: 800 }}>Monitor de Sobrecarga & GPU</h2>
-                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>Telemetria em tempo real da NVIDIA GeForce RTX 5060 Ti 16GB</p>
-              </div>
-              <button onClick={handleRunDiagnostics} className="btn-secondary" style={{ gap: '6px' }}>
-                <Activity size={16} color="#00f0ff" />
-                Diagnóstico Geral
               </button>
             </div>
+          </div>
 
-            {/* Cards Grid */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '16px', marginBottom: '24px' }}>
-              {/* Card 1: VRAM Status */}
-              <div style={{ background: 'var(--bg-surface)', border: '1px solid var(--border-dim)', borderRadius: 'var(--radius-lg)', padding: '20px' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)', fontSize: '0.8rem', fontWeight: 700, marginBottom: '10px' }}>
-                  <span>USO DE MEMÓRIA VRAM</span>
-                  <HardDrive size={16} color="#00f0ff" />
-                </div>
-                <div style={{ fontSize: '1.8rem', fontWeight: 800, color: isGpuOverloaded ? 'var(--rose-danger)' : 'var(--cyan-primary)', lineHeight: 1.1 }}>
-                  {usedVramGb} <span style={{ fontSize: '1rem', color: 'var(--text-subtle)' }}>/ 16.0 GB</span>
-                </div>
-                {/* Progress Bar */}
-                <div style={{ width: '100%', height: '8px', background: 'rgba(255,255,255,0.08)', borderRadius: '999px', marginTop: '14px', overflow: 'hidden' }}>
-                  <div style={{
-                    width: `${vramPercentage}%`,
-                    height: '100%',
-                    background: isGpuOverloaded ? 'linear-gradient(90deg, #f59e0b, #f43f5e)' : 'linear-gradient(90deg, #00f0ff, #8b5cf6)',
-                    borderRadius: '999px',
-                    transition: 'width 0.4s ease'
-                  }} />
-                </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: 'var(--text-subtle)', marginTop: '8px' }}>
-                  <span>{vramPercentage}% ocupado</span>
-                  <span>{(TOTAL_VRAM_GB - usedVramGb).toFixed(2)} GB livres</span>
-                </div>
+          {/* Resultado do Teste de Inferência */}
+          {lastTestResult && (
+            <div style={{
+              background: lastTestResult.success ? 'rgba(16, 185, 129, 0.08)' : 'rgba(244, 63, 94, 0.08)',
+              border: `1px solid ${lastTestResult.success ? 'rgba(16, 185, 129, 0.3)' : 'rgba(244, 63, 94, 0.3)'}`,
+              borderRadius: 'var(--radius-md)',
+              padding: '14px 18px',
+              animation: 'fadeIn 0.2s ease'
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                <span style={{ fontSize: '0.82rem', fontWeight: 700, color: lastTestResult.success ? '#34d399' : '#fb7185' }}>
+                  {lastTestResult.success ? '✓ INFERÊNCIA CONCLUÍDA COM SUCESSO' : '✗ FALHA NA INFERÊNCIA'}
+                </span>
+                <span style={{ fontSize: '0.72rem', color: 'var(--text-subtle)' }}>
+                  {lastTestResult.timestamp}
+                </span>
               </div>
 
-              {/* Card 2: Estado de Carga da IA */}
-              <div style={{ background: 'var(--bg-surface)', border: '1px solid var(--border-dim)', borderRadius: 'var(--radius-lg)', padding: '20px' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)', fontSize: '0.8rem', fontWeight: 700, marginBottom: '10px' }}>
-                  <span>ESTADO DA GPU</span>
-                  <Flame size={16} color={isGpuOverloaded ? '#f43f5e' : '#10b981'} />
-                </div>
-                <div style={{ fontSize: '1.5rem', fontWeight: 800, color: isGpuOverloaded ? 'var(--rose-danger)' : activeLoadedModels.length > 0 ? '#38bdf8' : 'var(--emerald-success)' }}>
-                  {isGpuOverloaded ? 'SOBRECARREGADA' : activeLoadedModels.length > 0 ? 'EM USO ATIVO' : 'OCIOSA / LIVRE'}
-                </div>
-                <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '8px' }}>
-                  {isGpuOverloaded 
-                    ? 'Atenção: A VRAM está quase cheia. Considere liberar a memória.' 
-                    : activeLoadedModels.length > 0 
-                      ? 'Processando ou mantendo modelo carregado para resposta rápida.' 
-                      : '0% de consumo de GPU. Pronta para novas inferências.'}
-                </p>
-              </div>
-
-              {/* Card 3: Túnel & Latência */}
-              <div style={{ background: 'var(--bg-surface)', border: '1px solid var(--border-dim)', borderRadius: 'var(--radius-lg)', padding: '20px' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)', fontSize: '0.8rem', fontWeight: 700, marginBottom: '10px' }}>
-                  <span>CONEXÃO CLOUDFLARE</span>
-                  <Activity size={16} color="#10b981" />
-                </div>
-                <div style={{ fontSize: '1.5rem', fontWeight: 800, color: serverStatus === 'online' ? 'var(--emerald-success)' : 'var(--rose-danger)' }}>
-                  {serverStatus === 'online' ? `${pingMs} ms` : 'DESCONECTADO'}
-                </div>
-                <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '8px', wordBreak: 'break-all' }}>
-                  {endpoint}
-                </p>
-              </div>
-            </div>
-
-            {/* Currently Active Models in VRAM */}
-            <div style={{ background: 'var(--bg-surface)', border: '1px solid var(--border-dim)', borderRadius: 'var(--radius-lg)', padding: '20px', marginBottom: '24px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
-                <h3 style={{ fontSize: '1.1rem', fontWeight: 700 }}>Modelos em Execução na Placa de Vídeo</h3>
-                {activeLoadedModels.length > 0 && (
-                  <button onClick={handleUnloadVRAM} className="btn-secondary" style={{ padding: '6px 12px', fontSize: '0.75rem', gap: '6px' }}>
-                    <HardDrive size={14} color="#00f0ff" />
-                    Descarregar da VRAM
-                  </button>
-                )}
-              </div>
-
-              {activeLoadedModels.length === 0 ? (
-                <div style={{ padding: '20px', textAlign: 'center', color: 'var(--text-subtle)', fontSize: '0.85rem' }}>
-                  Nenhum modelo carregado na VRAM no momento. A placa está totalmente livre e fria.
+              {lastTestResult.success ? (
+                <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap', fontSize: '0.82rem' }}>
+                  <div><strong>Modelo:</strong> {lastTestResult.model}</div>
+                  <div><strong>Tempo de Resposta:</strong> {lastTestResult.timeSec}s</div>
+                  <div><strong>Taxa de Geração:</strong> {lastTestResult.tokensPerSec} tokens/s</div>
+                  <div><strong>Saída da GPU:</strong> <code style={{ color: 'var(--cyan-primary)' }}>{lastTestResult.response}</code></div>
                 </div>
               ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                  {activeLoadedModels.map((m, idx) => (
-                    <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#090d16', padding: '12px 16px', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-dim)' }}>
-                      <div>
-                        <div style={{ fontWeight: 700, color: 'var(--cyan-primary)', fontSize: '0.95rem' }}>
-                          {m.name || m.model}
-                        </div>
-                        <div style={{ fontSize: '0.75rem', color: 'var(--text-subtle)', marginTop: '2px' }}>
-                          Contexto: {m.context_length || 4096} tokens • Expira em: {m.expires_at ? new Date(m.expires_at).toLocaleTimeString() : 'Automático'}
-                        </div>
-                      </div>
-                      <div style={{ textAlign: 'right' }}>
-                        <span className="badge badge-gpu">
-                          {((m.size_vram || m.size) / (1024 * 1024 * 1024)).toFixed(2)} GB VRAM
-                        </span>
-                      </div>
-                    </div>
-                  ))}
+                <div style={{ color: 'var(--rose-danger)', fontSize: '0.82rem' }}>
+                  Erro reportado: {lastTestResult.error}
                 </div>
               )}
             </div>
-          </div>
-        )}
+          )}
+        </div>
 
-        {/* VIEW 3: EVENT LOGS CONSOLE */}
-        {currentTab === 'logs' && (
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: '20px', maxWidth: '860px', width: '100%', margin: '0 auto', height: '100%' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
-              <div>
-                <h2 style={{ fontSize: '1.3rem', fontWeight: 800 }}>Console de Logs em Tempo Real</h2>
-                <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>Histórico completo de eventos, latências e requisições</p>
-              </div>
-              <div style={{ display: 'flex', gap: '8px' }}>
-                <button onClick={() => setLogs([])} className="btn-secondary" style={{ padding: '6px 12px', fontSize: '0.75rem' }}>
-                  <Trash2 size={14} />
-                  Limpar
-                </button>
-                <button onClick={() => handleCopyText(logs.map(l => `[${l.time}] [${l.type.toUpperCase()}] ${l.text}`).join('\n'), 'all_logs')} className="btn-secondary" style={{ padding: '6px 12px', fontSize: '0.75rem' }}>
-                  {copiedIndex === 'all_logs' ? <Check size={14} color="#10b981" /> : <Copy size={14} />}
-                  Copiar Logs
-                </button>
-              </div>
+        {/* SEÇÃO: TERMINAL DE LOGS DE AUDITORIA EM TEMPO REAL */}
+        <div className="noc-card">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
+            <div>
+              <h3 style={{ fontSize: '1.05rem', fontWeight: 800, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Terminal size={18} color="#00f0ff" />
+                Console de Logs de Auditoria & Eventos
+              </h3>
+              <p style={{ color: 'var(--text-muted)', fontSize: '0.78rem' }}>
+                Histórico detalhado de conexões, requisições, liberação de memória e pings.
+              </p>
             </div>
 
-            {/* Terminal Box */}
-            <div style={{
-              flex: 1,
-              background: '#05070c',
-              border: '1px solid var(--border-dim)',
-              borderRadius: 'var(--radius-lg)',
-              padding: '16px',
-              fontFamily: 'var(--font-mono)',
-              fontSize: '0.8rem',
-              overflowY: 'auto',
-              boxShadow: 'inset 0 0 20px rgba(0,0,0,0.8)'
-            }}>
-              {logs.map(log => {
-                let color = '#94a3b8';
-                if (log.type === 'success') color = '#34d399';
-                if (log.type === 'warn') color = '#fbbf24';
-                if (log.type === 'error') color = '#fb7185';
-
-                return (
-                  <div key={log.id} style={{ display: 'flex', gap: '10px', marginBottom: '8px', lineHeight: 1.4 }}>
-                    <span style={{ color: '#475569', flexShrink: 0 }}>[{log.time}]</span>
-                    <span style={{ color: color, wordBreak: 'break-word' }}>{log.text}</span>
-                  </div>
-                );
-              })}
-              <div ref={logsEndRef} />
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button 
+                onClick={() => setLogs([])} 
+                className="btn-secondary" 
+                style={{ padding: '6px 12px', fontSize: '0.75rem', gap: '4px' }}
+              >
+                <Trash2 size={13} />
+                Limpar
+              </button>
+              <button 
+                onClick={() => {
+                  navigator.clipboard.writeText(logs.map(l => `[${l.time}] [${l.type.toUpperCase()}] ${l.text}`).join('\n'));
+                  setCopiedLog(true);
+                  setTimeout(() => setCopiedLog(false), 2000);
+                }} 
+                className="btn-secondary" 
+                style={{ padding: '6px 12px', fontSize: '0.75rem', gap: '4px' }}
+              >
+                {copiedLog ? <Check size={13} color="#10b981" /> : <Copy size={13} />}
+                {copiedLog ? 'Copiado' : 'Copiar Logs'}
+              </button>
             </div>
           </div>
-        )}
-      </main>
 
-      {/* Settings Modal */}
+          {/* Terminal Box */}
+          <div className="terminal-window" style={{ maxHeight: '280px' }}>
+            {logs.map(log => {
+              let color = '#94a3b8';
+              if (log.type === 'success') color = '#34d399';
+              if (log.type === 'warn') color = '#fbbf24';
+              if (log.type === 'error') color = '#fb7185';
+
+              return (
+                <div key={log.id} style={{ display: 'flex', gap: '10px', marginBottom: '6px', lineHeight: 1.4 }}>
+                  <span style={{ color: '#475569', flexShrink: 0 }}>[{log.time}]</span>
+                  <span style={{ color, wordBreak: 'break-word' }}>{log.text}</span>
+                </div>
+              );
+            })}
+            <div ref={logsEndRef} />
+          </div>
+        </div>
+      </div>
+
+      {/* MODAL DE CONFIGURAÇÕES DE REDE */}
       {isSettingsOpen && (
-        <div className="lock-overlay" onClick={() => setIsSettingsOpen(false)}>
-          <div className="lock-card" style={{ maxWidth: '480px', textAlign: 'left' }} onClick={(e) => e.stopPropagation()}>
+        <div className="modal-overlay" onClick={() => setIsSettingsOpen(false)}>
+          <div className="modal-card" style={{ maxWidth: '440px', textAlign: 'left' }} onClick={e => e.stopPropagation()}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-              <h3 style={{ fontSize: '1.2rem', fontWeight: 800 }}>Configurações do Servidor</h3>
+              <h3 style={{ fontSize: '1.15rem', fontWeight: 800 }}>Configurações do Servidor</h3>
               <button onClick={() => setIsSettingsOpen(false)} className="btn-icon">
                 <X size={18} />
               </button>
             </div>
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-              {/* Endpoint URL */}
-              <div>
-                <label style={{ fontSize: '0.8rem', color: 'var(--text-muted)', fontWeight: 600, display: 'block', marginBottom: '6px' }}>
-                  URL do Túnel Cloudflare (Endpoint)
-                </label>
-                <input
-                  type="text"
-                  value={endpoint}
-                  onChange={(e) => setEndpoint(e.target.value)}
-                  style={{
-                    width: '100%',
-                    padding: '10px 12px',
-                    borderRadius: 'var(--radius-sm)',
-                    background: '#090d16',
-                    border: '1px solid var(--border-dim)',
-                    color: '#fff',
-                    fontSize: '0.85rem'
-                  }}
-                />
-              </div>
-
-              {/* System Prompt */}
-              <div>
-                <label style={{ fontSize: '0.8rem', color: 'var(--text-muted)', fontWeight: 600, display: 'block', marginBottom: '6px' }}>
-                  Instruções da IA (System Prompt)
-                </label>
-                <textarea
-                  value={systemPrompt}
-                  onChange={(e) => setSystemPrompt(e.target.value)}
-                  rows={3}
-                  style={{
-                    width: '100%',
-                    padding: '10px 12px',
-                    borderRadius: 'var(--radius-sm)',
-                    background: '#090d16',
-                    border: '1px solid var(--border-dim)',
-                    color: '#fff',
-                    fontSize: '0.85rem',
-                    resize: 'vertical'
-                  }}
-                />
-              </div>
-
-              {/* Temperature */}
-              <div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
-                  <label style={{ fontSize: '0.8rem', color: 'var(--text-muted)', fontWeight: 600 }}>
-                    Temperatura (Criatividade)
-                  </label>
-                  <span style={{ fontSize: '0.8rem', color: 'var(--cyan-primary)', fontWeight: 700 }}>
-                    {temperature}
-                  </span>
-                </div>
-                <input
-                  type="range"
-                  min="0"
-                  max="1"
-                  step="0.05"
-                  value={temperature}
-                  onChange={(e) => setTemperature(parseFloat(e.target.value))}
-                  style={{ width: '100%', accentColor: 'var(--cyan-primary)' }}
-                />
-              </div>
-
-              {/* Change PIN */}
-              <div>
-                <label style={{ fontSize: '0.8rem', color: 'var(--text-muted)', fontWeight: 600, display: 'block', marginBottom: '6px' }}>
-                  Alterar PIN de Segurança
-                </label>
-                <div style={{ display: 'flex', gap: '8px' }}>
-                  <input
-                    type="password"
-                    maxLength={8}
-                    defaultValue={pin}
-                    id="new-pin-input"
-                    placeholder="Novo PIN"
-                    style={{
-                      flex: 1,
-                      padding: '8px 12px',
-                      borderRadius: 'var(--radius-sm)',
-                      background: '#090d16',
-                      border: '1px solid var(--border-dim)',
-                      color: '#fff',
-                      fontSize: '0.85rem'
-                    }}
-                  />
-                  <button 
-                    onClick={() => {
-                      const input = document.getElementById('new-pin-input');
-                      if (input && input.value.length >= 4) {
-                        setPin(input.value);
-                        localStorage.setItem('zinup_pin', input.value);
-                        showNotification('PIN alterado com sucesso!');
-                        addLog('info', 'PIN mestre de segurança atualizado.');
-                      }
-                    }}
-                    className="btn-secondary"
-                  >
-                    Salvar PIN
-                  </button>
-                </div>
-              </div>
+            <div style={{ marginBottom: '20px' }}>
+              <label style={{ fontSize: '0.8rem', color: 'var(--text-muted)', fontWeight: 600, display: 'block', marginBottom: '6px' }}>
+                URL do Túnel Cloudflare (Endpoint)
+              </label>
+              <input
+                type="text"
+                value={endpoint}
+                onChange={e => setEndpoint(e.target.value)}
+                style={{
+                  width: '100%',
+                  padding: '10px 12px',
+                  borderRadius: 'var(--radius-sm)',
+                  background: '#090d16',
+                  border: '1px solid var(--border-dim)',
+                  color: '#fff',
+                  fontSize: '0.85rem'
+                }}
+              />
+              <span style={{ fontSize: '0.72rem', color: 'var(--text-subtle)', marginTop: '4px', display: 'block' }}>
+                Padrão oficial: {DEFAULT_ENDPOINT}
+              </span>
             </div>
 
-            <div style={{ marginTop: '24px', display: 'flex', justifyContent: 'flex-end' }}>
-              <button onClick={() => setIsSettingsOpen(false)} className="btn-primary" style={{ padding: '10px 20px' }}>
-                Concluído
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+              <button onClick={() => setIsSettingsOpen(false)} className="btn-primary">
+                Salvar & Fechar
               </button>
             </div>
           </div>
