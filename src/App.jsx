@@ -16,14 +16,25 @@ import {
   ShieldCheck, 
   Zap, 
   PlusCircle, 
-  HelpCircle,
-  HardDrive
+  HardDrive,
+  Activity,
+  Terminal,
+  MessageSquare,
+  AlertTriangle,
+  CheckCircle2,
+  Clock,
+  Flame,
+  Gauge
 } from 'lucide-react';
 
 const DEFAULT_ENDPOINT = 'https://zinia.sjlsolucoes.com.br';
 const DEFAULT_MODEL = 'llama3.1:8b';
+const TOTAL_VRAM_GB = 16.0;
 
 export default function App() {
+  // Navigation tab: 'chat' | 'telemetry' | 'logs'
+  const [currentTab, setCurrentTab] = useState('chat');
+
   // Config & Security States
   const [pin, setPin] = useState(() => localStorage.getItem('zinup_pin') || '1234');
   const [enteredPin, setEnteredPin] = useState('');
@@ -40,12 +51,23 @@ export default function App() {
   const [temperature, setTemperature] = useState(() => parseFloat(localStorage.getItem('zinup_temperature') || '0.7'));
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
-  // Server & Models States
+  // Server, GPU & Models States
   const [serverStatus, setServerStatus] = useState('checking'); // 'online' | 'offline' | 'checking'
   const [pingMs, setPingMs] = useState(null);
   const [models, setModels] = useState([]);
   const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
   const [isCheckingServer, setIsCheckingServer] = useState(false);
+  
+  // GPU & Overload Telemetry
+  const [activeLoadedModels, setActiveLoadedModels] = useState([]);
+  const [usedVramGb, setUsedVramGb] = useState(0);
+  const [vramPercentage, setVramPercentage] = useState(0);
+  const [isGpuOverloaded, setIsGpuOverloaded] = useState(false);
+
+  // Event Logs State
+  const [logs, setLogs] = useState(() => [
+    { id: 1, type: 'info', text: 'Painel Zinup IA inicializado.', time: new Date().toLocaleTimeString() }
+  ]);
 
   // Chat & UI States
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -61,12 +83,23 @@ export default function App() {
   const [inputMessage, setInputMessage] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [copiedIndex, setCopiedIndex] = useState(null);
-  const [vramNotification, setVramNotification] = useState('');
+  const [notification, setNotification] = useState('');
 
   const abortControllerRef = useRef(null);
   const messagesEndRef = useRef(null);
+  const logsEndRef = useRef(null);
 
   const activeConversation = conversations.find(c => c.id === activeConvId) || conversations[0];
+
+  const addLog = (type, text) => {
+    const newEntry = {
+      id: Date.now() + Math.random(),
+      type, // 'info' | 'success' | 'warn' | 'error'
+      text,
+      time: new Date().toLocaleTimeString()
+    };
+    setLogs(prev => [newEntry, ...prev.slice(0, 150)]);
+  };
 
   // Save conversations to localStorage
   useEffect(() => {
@@ -80,43 +113,80 @@ export default function App() {
     localStorage.setItem('zinup_temperature', temperature.toString());
   }, [endpoint, systemPrompt, temperature]);
 
-  // Check server health & fetch models
-  const checkServerHealth = async () => {
+  // Poll server health & GPU status
+  const pollServerAndGpu = async () => {
     setIsCheckingServer(true);
-    setServerStatus('checking');
     const startTime = performance.now();
+    const cleanEndpoint = endpoint.replace(/\/+$/, '');
+
     try {
-      const cleanEndpoint = endpoint.replace(/\/+$/, '');
-      const res = await fetch(`${cleanEndpoint}/api/tags`, {
+      // 1. Fetch running models on GPU via /api/ps
+      const psRes = await fetch(`${cleanEndpoint}/api/ps`, {
         method: 'GET',
         headers: { 'Accept': 'application/json' },
-        signal: AbortSignal.timeout(6000)
+        signal: AbortSignal.timeout(5000)
       });
 
-      if (res.ok) {
-        const data = await res.json();
+      if (psRes.ok) {
+        const psData = await psRes.json();
         const latency = Math.round(performance.now() - startTime);
         setPingMs(latency);
         setServerStatus('online');
 
-        if (data.models && Array.isArray(data.models) && data.models.length > 0) {
-          const modelList = data.models.map(m => ({
-            name: m.name,
-            size: m.size ? (m.size / (1024 * 1024 * 1024)).toFixed(1) + ' GB' : ''
-          }));
-          setModels(modelList);
-          if (!modelList.some(m => m.name === selectedModel)) {
-            setSelectedModel(modelList[0].name);
+        if (psData.models && Array.isArray(psData.models)) {
+          setActiveLoadedModels(psData.models);
+          const totalVramBytes = psData.models.reduce((acc, m) => acc + (m.size_vram || m.size || 0), 0);
+          const gb = parseFloat((totalVramBytes / (1024 * 1024 * 1024)).toFixed(2));
+          setUsedVramGb(gb);
+
+          const pct = Math.min(100, Math.round((gb / TOTAL_VRAM_GB) * 100));
+          setVramPercentage(pct);
+
+          const overloaded = pct >= 85;
+          setIsGpuOverloaded(overloaded);
+
+          if (overloaded) {
+            addLog('warn', `⚠️ Alerta de Sobrecarga de VRAM: ${gb}GB / 16GB em uso (${pct}% da RTX 5060 Ti).`);
           }
+        } else {
+          setActiveLoadedModels([]);
+          setUsedVramGb(0);
+          setVramPercentage(0);
+          setIsGpuOverloaded(false);
         }
       } else {
         setServerStatus('offline');
         setPingMs(null);
+        addLog('error', `Falha de conexão com ${cleanEndpoint}/api/ps (HTTP ${psRes.status})`);
       }
+
+      // 2. Fetch all installed models via /api/tags if list is empty
+      if (models.length === 0) {
+        const tagsRes = await fetch(`${cleanEndpoint}/api/tags`, {
+          method: 'GET',
+          headers: { 'Accept': 'application/json' },
+          signal: AbortSignal.timeout(5000)
+        });
+        if (tagsRes.ok) {
+          const tagsData = await tagsRes.json();
+          if (tagsData.models && Array.isArray(tagsData.models)) {
+            const modelList = tagsData.models.map(m => ({
+              name: m.name,
+              size: m.size ? (m.size / (1024 * 1024 * 1024)).toFixed(1) + ' GB' : ''
+            }));
+            setModels(modelList);
+            addLog('success', `Carregados ${modelList.length} modelos instalados no servidor.`);
+            if (!modelList.some(m => m.name === selectedModel)) {
+              setSelectedModel(modelList[0].name);
+            }
+          }
+        }
+      }
+
     } catch (err) {
-      console.warn('Erro ao conectar ao servidor Ollama:', err);
       setServerStatus('offline');
       setPingMs(null);
+      addLog('error', `Queda de conexão detectada: ${err.message}`);
     } finally {
       setIsCheckingServer(false);
     }
@@ -124,11 +194,11 @@ export default function App() {
 
   useEffect(() => {
     if (!isLocked) {
-      checkServerHealth();
-      const interval = setInterval(checkServerHealth, 20000);
+      pollServerAndGpu();
+      const interval = setInterval(pollServerAndGpu, 4000);
       return () => clearInterval(interval);
     }
-  }, [isLocked, endpoint]);
+  }, [isLocked, endpoint, models.length]);
 
   // Scroll to bottom on new messages
   useEffect(() => {
@@ -141,12 +211,14 @@ export default function App() {
     if (enteredPin === pin) {
       setIsLocked(false);
       setPinError(false);
+      addLog('info', 'Painel desbloqueado com sucesso via PIN.');
       if (rememberDevice) {
         localStorage.setItem('zinup_remember_unlock', 'true');
       }
     } else {
       setPinError(true);
       setEnteredPin('');
+      addLog('warn', 'Tentativa de desbloqueio com PIN incorreto.');
       setTimeout(() => setPinError(false), 2000);
     }
   };
@@ -155,33 +227,70 @@ export default function App() {
     localStorage.removeItem('zinup_remember_unlock');
     setIsLocked(true);
     setEnteredPin('');
+    addLog('info', 'Painel bloqueado manualmente.');
   };
 
-  // Change PIN handler
-  const handleChangePin = (newPin) => {
-    if (newPin && newPin.length >= 4) {
-      setPin(newPin);
-      localStorage.setItem('zinup_pin', newPin);
-      alert('PIN de segurança atualizado com sucesso!');
-    }
+  const showNotification = (msg) => {
+    setNotification(msg);
+    setTimeout(() => setNotification(''), 4000);
   };
 
   // Free GPU VRAM
   const handleUnloadVRAM = async () => {
     try {
-      setVramNotification('Liberando memória VRAM da GPU...');
+      showNotification('Liberando memória VRAM da GPU...');
+      addLog('info', 'Enviando comando de liberação de VRAM (keep_alive: 0)...');
       const cleanEndpoint = endpoint.replace(/\/+$/, '');
+      
+      const currentLoaded = activeLoadedModels.length > 0 ? activeLoadedModels[0].name : selectedModel;
       await fetch(`${cleanEndpoint}/api/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: selectedModel, keep_alive: 0 })
+        body: JSON.stringify({ model: currentLoaded, keep_alive: 0 })
       });
-      setVramNotification('VRAM da RTX 5060 Ti descarregada com sucesso! (0 MB em uso)');
-      setTimeout(() => setVramNotification(''), 4000);
-    } catch {
-      setVramNotification('Erro ao descarregar VRAM da GPU.');
-      setTimeout(() => setVramNotification(''), 4000);
+      
+      showNotification('VRAM da RTX 5060 Ti descarregada com sucesso! (0 MB)');
+      addLog('success', `Modelo ${currentLoaded} descarregado da GPU. VRAM liberada.`);
+      pollServerAndGpu();
+    } catch (err) {
+      showNotification('Erro ao descarregar VRAM da GPU.');
+      addLog('error', `Falha ao liberar VRAM: ${err.message}`);
     }
+  };
+
+  // Run full system diagnostics
+  const handleRunDiagnostics = async () => {
+    addLog('info', '--- INICIANDO DIAGNÓSTICO COMPLETO DO SERVIDOR ---');
+    const cleanEndpoint = endpoint.replace(/\/+$/, '');
+
+    try {
+      const vStart = performance.now();
+      const vRes = await fetch(`${cleanEndpoint}/api/version`);
+      const vData = await vRes.json();
+      addLog('success', `[OK] Endpoint Ativo: Ollama v${vData.version} (${Math.round(performance.now() - vStart)}ms)`);
+    } catch (err) {
+      addLog('error', `[FALHA] Teste de Versão: ${err.message}`);
+    }
+
+    try {
+      const psRes = await fetch(`${cleanEndpoint}/api/ps`);
+      const psData = await psRes.json();
+      const count = psData.models ? psData.models.length : 0;
+      addLog('success', `[OK] Status da GPU: ${count} modelos em execução na VRAM da RTX 5060 Ti.`);
+    } catch (err) {
+      addLog('error', `[FALHA] Teste de Status de GPU: ${err.message}`);
+    }
+
+    try {
+      const tRes = await fetch(`${cleanEndpoint}/api/tags`);
+      const tData = await tRes.json();
+      addLog('success', `[OK] Modelos Instalados: ${tData.models?.length || 0} disponíveis para uso.`);
+    } catch (err) {
+      addLog('error', `[FALHA] Teste de Modelos: ${err.message}`);
+    }
+
+    addLog('info', '--- DIAGNÓSTICO CONCLUÍDO ---');
+    showNotification('Diagnóstico concluído! Verifique a aba de Logs.');
   };
 
   // Send message with streaming
@@ -190,11 +299,11 @@ export default function App() {
     if (!text || isGenerating) return;
 
     setInputMessage('');
+    addLog('info', `Iniciando requisição de chat com modelo '${selectedModel}'...`);
 
     const userMsg = { role: 'user', content: text, timestamp: new Date().toLocaleTimeString() };
     const updatedMessages = [...activeConversation.messages, userMsg];
 
-    // Update conversation title if first message
     let updatedTitle = activeConversation.title;
     if (activeConversation.messages.length === 0) {
       updatedTitle = text.slice(0, 28) + (text.length > 28 ? '...' : '');
@@ -204,7 +313,6 @@ export default function App() {
       c.id === activeConvId ? { ...c, title: updatedTitle, messages: updatedMessages } : c
     ));
 
-    // Prepare assistant message
     const assistantMsgIndex = updatedMessages.length;
     const initialAssistantMsg = { 
       role: 'assistant', 
@@ -286,6 +394,8 @@ export default function App() {
       const totalSeconds = ((performance.now() - startTime) / 1000).toFixed(1);
       const tokensPerSec = totalSeconds > 0 ? (tokenCount / totalSeconds).toFixed(1) : '0';
 
+      addLog('success', `Resposta concluída: ${tokenCount} tokens em ${totalSeconds}s (${tokensPerSec} t/s) via ${selectedModel}.`);
+
       setConversations(prev => prev.map(c => {
         if (c.id !== activeConvId) return c;
         const msgs = [...c.messages];
@@ -302,15 +412,16 @@ export default function App() {
 
     } catch (err) {
       if (err.name === 'AbortError') {
-        console.log('Geração cancelada pelo usuário.');
+        addLog('warn', 'Geração interrompida pelo usuário.');
       } else {
+        addLog('error', `Falha na inferência da IA: ${err.message}`);
         setConversations(prev => prev.map(c => {
           if (c.id !== activeConvId) return c;
           const msgs = [...c.messages];
           if (msgs[assistantMsgIndex]) {
             msgs[assistantMsgIndex] = {
               ...msgs[assistantMsgIndex],
-              content: `⚠️ Não foi possível obter resposta: ${err.message}. Verifique se o servidor zinia está online e com o túnel ativo.`,
+              content: `⚠️ Não foi possível obter resposta: ${err.message}. Verifique a aba de Logs e Telemetria para detalhes.`,
               isStreaming: false,
               isError: true
             };
@@ -321,6 +432,7 @@ export default function App() {
     } finally {
       setIsGenerating(false);
       abortControllerRef.current = null;
+      pollServerAndGpu();
     }
   };
 
@@ -337,6 +449,7 @@ export default function App() {
     setConversations(prev => [newConv, ...prev]);
     setActiveConvId(newId);
     setSidebarOpen(false);
+    addLog('info', 'Nova conversa iniciada.');
   };
 
   const handleDeleteConversation = (id, e) => {
@@ -359,7 +472,7 @@ export default function App() {
     setTimeout(() => setCopiedIndex(null), 2000);
   };
 
-  // Format simple markdown into JSX
+  // Render markdown code snippets
   const renderMessageContent = (content) => {
     if (!content) return null;
     const parts = content.split(/(```[\s\S]*?```)/g);
@@ -490,7 +603,7 @@ export default function App() {
           </form>
 
           <p style={{ marginTop: '20px', fontSize: '0.75rem', color: 'var(--text-subtle)' }}>
-            PIN padrão inicial: <strong>1234</strong> (alterável nas configurações)
+            PIN padrão: <strong>1234</strong> (alterável nas configurações)
           </p>
         </div>
       </div>
@@ -499,8 +612,8 @@ export default function App() {
 
   return (
     <div className="app-container">
-      {/* VRAM Notification Banner */}
-      {vramNotification && (
+      {/* Toast Notification Banner */}
+      {notification && (
         <div style={{
           position: 'fixed',
           top: '16px',
@@ -520,7 +633,7 @@ export default function App() {
           animation: 'fadeIn 0.2s ease'
         }}>
           <Zap size={16} />
-          {vramNotification}
+          {notification}
         </div>
       )}
 
@@ -574,6 +687,64 @@ export default function App() {
           </button>
         </div>
 
+        {/* Navigation Tabs (Mobile & Desktop) */}
+        <div style={{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: '6px', borderBottom: '1px solid var(--border-dim)' }}>
+          <button 
+            onClick={() => { setCurrentTab('chat'); setSidebarOpen(false); }}
+            className={`btn-secondary ${currentTab === 'chat' ? 'active-tab' : ''}`}
+            style={{
+              justifyContent: 'flex-start',
+              background: currentTab === 'chat' ? 'var(--bg-surface)' : 'transparent',
+              borderColor: currentTab === 'chat' ? 'var(--cyan-primary)' : 'transparent',
+              color: currentTab === 'chat' ? 'var(--cyan-primary)' : 'var(--text-muted)'
+            }}
+          >
+            <MessageSquare size={16} />
+            Chat com a IA
+          </button>
+
+          <button 
+            onClick={() => { setCurrentTab('telemetry'); setSidebarOpen(false); }}
+            className={`btn-secondary ${currentTab === 'telemetry' ? 'active-tab' : ''}`}
+            style={{
+              justifyContent: 'flex-start',
+              background: currentTab === 'telemetry' ? 'var(--bg-surface)' : 'transparent',
+              borderColor: currentTab === 'telemetry' ? 'var(--cyan-primary)' : 'transparent',
+              color: currentTab === 'telemetry' ? 'var(--cyan-primary)' : 'var(--text-muted)',
+              position: 'relative'
+            }}
+          >
+            <Gauge size={16} />
+            GPU & Sobrecarga
+            {activeLoadedModels.length > 0 && (
+              <span style={{
+                marginLeft: 'auto',
+                width: '8px',
+                height: '8px',
+                borderRadius: '50%',
+                background: isGpuOverloaded ? 'var(--rose-danger)' : 'var(--emerald-success)'
+              }} />
+            )}
+          </button>
+
+          <button 
+            onClick={() => { setCurrentTab('logs'); setSidebarOpen(false); }}
+            className={`btn-secondary ${currentTab === 'logs' ? 'active-tab' : ''}`}
+            style={{
+              justifyContent: 'flex-start',
+              background: currentTab === 'logs' ? 'var(--bg-surface)' : 'transparent',
+              borderColor: currentTab === 'logs' ? 'var(--cyan-primary)' : 'transparent',
+              color: currentTab === 'logs' ? 'var(--cyan-primary)' : 'var(--text-muted)'
+            }}
+          >
+            <Terminal size={16} />
+            Logs em Tempo Real
+            <span style={{ marginLeft: 'auto', fontSize: '0.7rem', color: 'var(--text-subtle)' }}>
+              {logs.length}
+            </span>
+          </button>
+        </div>
+
         <div style={{ padding: '14px 16px' }}>
           <button 
             id="new-chat-btn"
@@ -594,7 +765,7 @@ export default function App() {
           {conversations.map(conv => (
             <div
               key={conv.id}
-              onClick={() => { setActiveConvId(conv.id); setSidebarOpen(false); }}
+              onClick={() => { setActiveConvId(conv.id); setCurrentTab('chat'); setSidebarOpen(false); }}
               style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -641,7 +812,7 @@ export default function App() {
             onClick={handleUnloadVRAM}
             className="btn-secondary" 
             style={{ flex: 1, padding: '8px', fontSize: '0.75rem', gap: '6px' }}
-            title="Descarrega o modelo da memória VRAM da RTX 5060 Ti"
+            title="Descarrega qualquer modelo da VRAM da RTX 5060 Ti"
           >
             <HardDrive size={14} color="#00f0ff" />
             Liberar VRAM
@@ -657,9 +828,9 @@ export default function App() {
         </div>
       </aside>
 
-      {/* Main Chat Area */}
+      {/* Main Content Area */}
       <main className="main-chat-area">
-        {/* Top Navigation Bar */}
+        {/* Top Header Navigation */}
         <header className="glass-panel" style={{
           padding: '12px 18px',
           display: 'flex',
@@ -711,9 +882,37 @@ export default function App() {
 
           {/* Telemetry and Controls */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            {/* GPU Overload Mini Indicator */}
+            {activeLoadedModels.length > 0 ? (
+              <div 
+                onClick={() => setCurrentTab('telemetry')}
+                className="badge" 
+                style={{
+                  background: isGpuOverloaded ? 'rgba(244, 63, 94, 0.2)' : 'rgba(0, 240, 255, 0.15)',
+                  color: isGpuOverloaded ? '#fb7185' : 'var(--cyan-primary)',
+                  border: `1px solid ${isGpuOverloaded ? 'rgba(244, 63, 94, 0.4)' : 'rgba(0, 240, 255, 0.3)'}`,
+                  cursor: 'pointer'
+                }}
+                title="Clique para ver a telemetria da GPU"
+              >
+                <Flame size={12} color={isGpuOverloaded ? '#fb7185' : '#00f0ff'} />
+                <span>GPU {vramPercentage}%</span>
+              </div>
+            ) : (
+              <div 
+                onClick={() => setCurrentTab('telemetry')}
+                className="badge badge-gpu" 
+                style={{ cursor: 'pointer' }}
+                title="GPU Ociosa / Livre"
+              >
+                <Cpu size={12} />
+                <span>GPU Livre</span>
+              </div>
+            )}
+
             {/* Status Badge */}
             <div 
-              onClick={checkServerHealth}
+              onClick={pollServerAndGpu}
               className={`badge ${serverStatus === 'online' ? 'badge-online' : 'badge-offline'}`}
               style={{ cursor: 'pointer' }}
               title="Clique para testar conexão novamente"
@@ -738,179 +937,348 @@ export default function App() {
           </div>
         </header>
 
-        {/* Messages List Area */}
-        <div className="messages-container">
-          {activeConversation.messages.length === 0 ? (
-            /* Empty State Hero */
-            <div style={{
-              margin: 'auto',
-              maxWidth: '520px',
-              textAlign: 'center',
-              padding: '30px 20px',
-              animation: 'fadeIn 0.3s ease'
-            }}>
-              <div style={{
-                width: '64px',
-                height: '64px',
-                borderRadius: '20px',
-                margin: '0 auto 20px auto',
-                background: 'linear-gradient(135deg, rgba(0, 240, 255, 0.2), rgba(139, 92, 246, 0.2))',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                border: '1px solid rgba(0, 240, 255, 0.4)',
-                boxShadow: '0 0 30px rgba(0, 240, 255, 0.2)'
-              }}>
-                <Sparkles size={32} color="#00f0ff" />
-              </div>
-
-              <h2 style={{ fontSize: '1.6rem', fontWeight: 800, marginBottom: '8px', letterSpacing: '-0.02em' }}>
-                Servidor ZINUP IA Ativo
-              </h2>
-              <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: '24px', lineHeight: 1.5 }}>
-                Conectado diretamente à sua máquina local via túnel seguro Cloudflare. Modelo atual: <strong>{selectedModel}</strong> na RTX 5060 Ti 16GB.
-              </p>
-
-              {/* Quick Prompt Pills */}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '10px', textAlign: 'left' }}>
-                {[
-                  { title: 'Resumo e Análise', prompt: 'Resuma os pontos principais de um projeto de inteligência artificial autônomo.' },
-                  { title: 'Criação de Código', prompt: 'Escreva um script em Python para consumir a API local do Ollama com streaming.' },
-                  { title: 'Segurança & Túneis', prompt: 'Explique como proteger uma rota pública do Cloudflare Zero Trust com Bearer Token.' },
-                  { title: 'Otimização de GPU', prompt: 'Quais parâmetros posso ajustar no Ollama para extrair a máxima velocidade da RTX 5060 Ti?' }
-                ].map((item, idx) => (
-                  <div
-                    key={idx}
-                    onClick={() => handleSendMessage(item.prompt)}
-                    style={{
-                      background: 'var(--bg-surface)',
-                      border: '1px solid var(--border-dim)',
-                      borderRadius: 'var(--radius-md)',
-                      padding: '12px 14px',
-                      cursor: 'pointer',
-                      transition: 'all 0.2s ease'
-                    }}
-                    onMouseEnter={(e) => {
-                      e.currentTarget.style.borderColor = 'var(--border-focus)';
-                      e.currentTarget.style.transform = 'translateY(-2px)';
-                    }}
-                    onMouseLeave={(e) => {
-                      e.currentTarget.style.borderColor = 'var(--border-dim)';
-                      e.currentTarget.style.transform = 'translateY(0)';
-                    }}
-                  >
-                    <div style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--cyan-primary)', marginBottom: '4px' }}>
-                      {item.title}
-                    </div>
-                    <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: 1.3 }}>
-                      {item.prompt}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : (
-            /* Render Messages */
-            activeConversation.messages.map((msg, idx) => (
-              <div key={idx} className={`message-row ${msg.role}`}>
-                {msg.role === 'assistant' && (
+        {/* VIEW 1: CHAT */}
+        {currentTab === 'chat' && (
+          <>
+            <div className="messages-container">
+              {activeConversation.messages.length === 0 ? (
+                /* Empty State Hero */
+                <div style={{
+                  margin: 'auto',
+                  maxWidth: '520px',
+                  textAlign: 'center',
+                  padding: '30px 20px',
+                  animation: 'fadeIn 0.3s ease'
+                }}>
                   <div style={{
-                    width: '32px',
-                    height: '32px',
-                    borderRadius: '8px',
-                    background: 'linear-gradient(135deg, var(--cyan-primary), #0284c7)',
+                    width: '64px',
+                    height: '64px',
+                    borderRadius: '20px',
+                    margin: '0 auto 20px auto',
+                    background: 'linear-gradient(135deg, rgba(0, 240, 255, 0.2), rgba(139, 92, 246, 0.2))',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
-                    flexShrink: 0
+                    border: '1px solid rgba(0, 240, 255, 0.4)',
+                    boxShadow: '0 0 30px rgba(0, 240, 255, 0.2)'
                   }}>
-                    <Cpu size={16} color="#030712" />
+                    <Sparkles size={32} color="#00f0ff" />
                   </div>
-                )}
 
-                <div className="message-bubble">
-                  {renderMessageContent(msg.content)}
+                  <h2 style={{ fontSize: '1.6rem', fontWeight: 800, marginBottom: '8px', letterSpacing: '-0.02em' }}>
+                    Servidor ZINUP IA Ativo
+                  </h2>
+                  <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: '24px', lineHeight: 1.5 }}>
+                    Conectado à RTX 5060 Ti 16GB via túnel seguro. Modelo atual: <strong>{selectedModel}</strong>.
+                  </p>
 
-                  {/* Message stats and copy button */}
-                  {msg.role === 'assistant' && (
-                    <div style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      marginTop: '10px',
-                      paddingTop: '8px',
-                      borderTop: '1px solid rgba(255, 255, 255, 0.06)',
-                      fontSize: '0.72rem',
-                      color: 'var(--text-subtle)'
-                    }}>
-                      <span>{msg.stats || (msg.isStreaming ? 'Gerando tokens na RTX 5060 Ti...' : '')}</span>
-                      <button
-                        onClick={() => handleCopyText(msg.content, idx)}
+                  {/* Quick Prompt Pills */}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '10px', textAlign: 'left' }}>
+                    {[
+                      { title: 'Resumo e Análise', prompt: 'Resuma os pontos principais de um projeto de inteligência artificial autônomo.' },
+                      { title: 'Criação de Código', prompt: 'Escreva um script em Python para consumir a API local do Ollama com streaming.' },
+                      { title: 'Segurança & Túneis', prompt: 'Explique como proteger uma rota pública do Cloudflare Zero Trust com Bearer Token.' },
+                      { title: 'Otimização de GPU', prompt: 'Quais parâmetros posso ajustar no Ollama para extrair a máxima velocidade da RTX 5060 Ti?' }
+                    ].map((item, idx) => (
+                      <div
+                        key={idx}
+                        onClick={() => handleSendMessage(item.prompt)}
                         style={{
-                          background: 'transparent',
-                          border: 'none',
-                          color: copiedIndex === idx ? '#10b981' : 'var(--text-subtle)',
+                          background: 'var(--bg-surface)',
+                          border: '1px solid var(--border-dim)',
+                          borderRadius: 'var(--radius-md)',
+                          padding: '12px 14px',
                           cursor: 'pointer',
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '4px',
-                          fontSize: '0.72rem'
+                          transition: 'all 0.2s ease'
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.borderColor = 'var(--border-focus)';
+                          e.currentTarget.style.transform = 'translateY(-2px)';
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.borderColor = 'var(--border-dim)';
+                          e.currentTarget.style.transform = 'translateY(0)';
                         }}
                       >
-                        {copiedIndex === idx ? <Check size={12} /> : <Copy size={12} />}
-                        {copiedIndex === idx ? 'Copiado' : 'Copiar'}
-                      </button>
+                        <div style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--cyan-primary)', marginBottom: '4px' }}>
+                          {item.title}
+                        </div>
+                        <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: 1.3 }}>
+                          {item.prompt}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                /* Render Messages */
+                activeConversation.messages.map((msg, idx) => (
+                  <div key={idx} className={`message-row ${msg.role}`}>
+                    {msg.role === 'assistant' && (
+                      <div style={{
+                        width: '32px',
+                        height: '32px',
+                        borderRadius: '8px',
+                        background: 'linear-gradient(135deg, var(--cyan-primary), #0284c7)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        flexShrink: 0
+                      }}>
+                        <Cpu size={16} color="#030712" />
+                      </div>
+                    )}
+
+                    <div className="message-bubble">
+                      {renderMessageContent(msg.content)}
+
+                      {/* Message stats and copy button */}
+                      {msg.role === 'assistant' && (
+                        <div style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          marginTop: '10px',
+                          paddingTop: '8px',
+                          borderTop: '1px solid rgba(255, 255, 255, 0.06)',
+                          fontSize: '0.72rem',
+                          color: 'var(--text-subtle)'
+                        }}>
+                          <span>{msg.stats || (msg.isStreaming ? 'Gerando tokens na RTX 5060 Ti...' : '')}</span>
+                          <button
+                            onClick={() => handleCopyText(msg.content, idx)}
+                            style={{
+                              background: 'transparent',
+                              border: 'none',
+                              color: copiedIndex === idx ? '#10b981' : 'var(--text-subtle)',
+                              cursor: 'pointer',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '4px',
+                              fontSize: '0.72rem'
+                            }}
+                          >
+                            {copiedIndex === idx ? <Check size={12} /> : <Copy size={12} />}
+                            {copiedIndex === idx ? 'Copiado' : 'Copiar'}
+                          </button>
+                        </div>
+                      )}
                     </div>
-                  )}
+                  </div>
+                ))
+              )}
+              <div ref={messagesEndRef} />
+            </div>
+
+            {/* Bottom Input Area */}
+            <div className="chat-input-wrapper">
+              <div className="chat-input-bar">
+                <textarea
+                  id="chat-input-textarea"
+                  className="chat-textarea"
+                  placeholder={serverStatus === 'offline' ? 'Servidor desconectado. Verifique os logs...' : `Converse com ${selectedModel}... (Shift+Enter para linha nova)`}
+                  value={inputMessage}
+                  onChange={(e) => setInputMessage(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSendMessage();
+                    }
+                  }}
+                  rows={1}
+                />
+
+                {isGenerating ? (
+                  <button 
+                    id="stop-generation-btn"
+                    onClick={handleStopGeneration}
+                    className="btn-primary" 
+                    style={{ background: 'var(--rose-danger)', padding: '10px 14px' }}
+                    title="Parar resposta"
+                  >
+                    <Square size={16} />
+                  </button>
+                ) : (
+                  <button 
+                    id="send-message-btn"
+                    onClick={() => handleSendMessage()}
+                    disabled={!inputMessage.trim() || isGenerating}
+                    className="btn-primary"
+                    style={{ padding: '10px 14px' }}
+                    title="Enviar mensagem"
+                  >
+                    <Send size={16} />
+                  </button>
+                )}
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* VIEW 2: GPU & OVERLOAD TELEMETRY */}
+        {currentTab === 'telemetry' && (
+          <div style={{ flex: 1, overflowY: 'auto', padding: '24px 20px', maxWidth: '860px', width: '100%', margin: '0 auto' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
+              <div>
+                <h2 style={{ fontSize: '1.4rem', fontWeight: 800 }}>Monitor de Sobrecarga & GPU</h2>
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>Telemetria em tempo real da NVIDIA GeForce RTX 5060 Ti 16GB</p>
+              </div>
+              <button onClick={handleRunDiagnostics} className="btn-secondary" style={{ gap: '6px' }}>
+                <Activity size={16} color="#00f0ff" />
+                Diagnóstico Geral
+              </button>
+            </div>
+
+            {/* Cards Grid */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '16px', marginBottom: '24px' }}>
+              {/* Card 1: VRAM Status */}
+              <div style={{ background: 'var(--bg-surface)', border: '1px solid var(--border-dim)', borderRadius: 'var(--radius-lg)', padding: '20px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)', fontSize: '0.8rem', fontWeight: 700, marginBottom: '10px' }}>
+                  <span>USO DE MEMÓRIA VRAM</span>
+                  <HardDrive size={16} color="#00f0ff" />
+                </div>
+                <div style={{ fontSize: '1.8rem', fontWeight: 800, color: isGpuOverloaded ? 'var(--rose-danger)' : 'var(--cyan-primary)', lineHeight: 1.1 }}>
+                  {usedVramGb} <span style={{ fontSize: '1rem', color: 'var(--text-subtle)' }}>/ 16.0 GB</span>
+                </div>
+                {/* Progress Bar */}
+                <div style={{ width: '100%', height: '8px', background: 'rgba(255,255,255,0.08)', borderRadius: '999px', marginTop: '14px', overflow: 'hidden' }}>
+                  <div style={{
+                    width: `${vramPercentage}%`,
+                    height: '100%',
+                    background: isGpuOverloaded ? 'linear-gradient(90deg, #f59e0b, #f43f5e)' : 'linear-gradient(90deg, #00f0ff, #8b5cf6)',
+                    borderRadius: '999px',
+                    transition: 'width 0.4s ease'
+                  }} />
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: 'var(--text-subtle)', marginTop: '8px' }}>
+                  <span>{vramPercentage}% ocupado</span>
+                  <span>{(TOTAL_VRAM_GB - usedVramGb).toFixed(2)} GB livres</span>
                 </div>
               </div>
-            ))
-          )}
-          <div ref={messagesEndRef} />
-        </div>
 
-        {/* Bottom Input Area */}
-        <div className="chat-input-wrapper">
-          <div className="chat-input-bar">
-            <textarea
-              id="chat-input-textarea"
-              className="chat-textarea"
-              placeholder={serverStatus === 'offline' ? 'Servidor desconectado. Verifique o servidor...' : `Converse com ${selectedModel}... (Shift+Enter para linha nova)`}
-              value={inputMessage}
-              onChange={(e) => setInputMessage(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  handleSendMessage();
-                }
-              }}
-              rows={1}
-            />
+              {/* Card 2: Estado de Carga da IA */}
+              <div style={{ background: 'var(--bg-surface)', border: '1px solid var(--border-dim)', borderRadius: 'var(--radius-lg)', padding: '20px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)', fontSize: '0.8rem', fontWeight: 700, marginBottom: '10px' }}>
+                  <span>ESTADO DA GPU</span>
+                  <Flame size={16} color={isGpuOverloaded ? '#f43f5e' : '#10b981'} />
+                </div>
+                <div style={{ fontSize: '1.5rem', fontWeight: 800, color: isGpuOverloaded ? 'var(--rose-danger)' : activeLoadedModels.length > 0 ? '#38bdf8' : 'var(--emerald-success)' }}>
+                  {isGpuOverloaded ? 'SOBRECARREGADA' : activeLoadedModels.length > 0 ? 'EM USO ATIVO' : 'OCIOSA / LIVRE'}
+                </div>
+                <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '8px' }}>
+                  {isGpuOverloaded 
+                    ? 'Atenção: A VRAM está quase cheia. Considere liberar a memória.' 
+                    : activeLoadedModels.length > 0 
+                      ? 'Processando ou mantendo modelo carregado para resposta rápida.' 
+                      : '0% de consumo de GPU. Pronta para novas inferências.'}
+                </p>
+              </div>
 
-            {isGenerating ? (
-              <button 
-                id="stop-generation-btn"
-                onClick={handleStopGeneration}
-                className="btn-primary" 
-                style={{ background: 'var(--rose-danger)', padding: '10px 14px' }}
-                title="Parar resposta"
-              >
-                <Square size={16} />
-              </button>
-            ) : (
-              <button 
-                id="send-message-btn"
-                onClick={() => handleSendMessage()}
-                disabled={!inputMessage.trim() || isGenerating}
-                className="btn-primary"
-                style={{ padding: '10px 14px' }}
-                title="Enviar mensagem"
-              >
-                <Send size={16} />
-              </button>
-            )}
+              {/* Card 3: Túnel & Latência */}
+              <div style={{ background: 'var(--bg-surface)', border: '1px solid var(--border-dim)', borderRadius: 'var(--radius-lg)', padding: '20px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)', fontSize: '0.8rem', fontWeight: 700, marginBottom: '10px' }}>
+                  <span>CONEXÃO CLOUDFLARE</span>
+                  <Activity size={16} color="#10b981" />
+                </div>
+                <div style={{ fontSize: '1.5rem', fontWeight: 800, color: serverStatus === 'online' ? 'var(--emerald-success)' : 'var(--rose-danger)' }}>
+                  {serverStatus === 'online' ? `${pingMs} ms` : 'DESCONECTADO'}
+                </div>
+                <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '8px', wordBreak: 'break-all' }}>
+                  {endpoint}
+                </p>
+              </div>
+            </div>
+
+            {/* Currently Active Models in VRAM */}
+            <div style={{ background: 'var(--bg-surface)', border: '1px solid var(--border-dim)', borderRadius: 'var(--radius-lg)', padding: '20px', marginBottom: '24px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
+                <h3 style={{ fontSize: '1.1rem', fontWeight: 700 }}>Modelos em Execução na Placa de Vídeo</h3>
+                {activeLoadedModels.length > 0 && (
+                  <button onClick={handleUnloadVRAM} className="btn-secondary" style={{ padding: '6px 12px', fontSize: '0.75rem', gap: '6px' }}>
+                    <HardDrive size={14} color="#00f0ff" />
+                    Descarregar da VRAM
+                  </button>
+                )}
+              </div>
+
+              {activeLoadedModels.length === 0 ? (
+                <div style={{ padding: '20px', textAlign: 'center', color: 'var(--text-subtle)', fontSize: '0.85rem' }}>
+                  Nenhum modelo carregado na VRAM no momento. A placa está totalmente livre e fria.
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  {activeLoadedModels.map((m, idx) => (
+                    <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#090d16', padding: '12px 16px', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-dim)' }}>
+                      <div>
+                        <div style={{ fontWeight: 700, color: 'var(--cyan-primary)', fontSize: '0.95rem' }}>
+                          {m.name || m.model}
+                        </div>
+                        <div style={{ fontSize: '0.75rem', color: 'var(--text-subtle)', marginTop: '2px' }}>
+                          Contexto: {m.context_length || 4096} tokens • Expira em: {m.expires_at ? new Date(m.expires_at).toLocaleTimeString() : 'Automático'}
+                        </div>
+                      </div>
+                      <div style={{ textAlign: 'right' }}>
+                        <span className="badge badge-gpu">
+                          {((m.size_vram || m.size) / (1024 * 1024 * 1024)).toFixed(2)} GB VRAM
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
-        </div>
+        )}
+
+        {/* VIEW 3: EVENT LOGS CONSOLE */}
+        {currentTab === 'logs' && (
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: '20px', maxWidth: '860px', width: '100%', margin: '0 auto', height: '100%' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
+              <div>
+                <h2 style={{ fontSize: '1.3rem', fontWeight: 800 }}>Console de Logs em Tempo Real</h2>
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>Histórico completo de eventos, latências e requisições</p>
+              </div>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button onClick={() => setLogs([])} className="btn-secondary" style={{ padding: '6px 12px', fontSize: '0.75rem' }}>
+                  <Trash2 size={14} />
+                  Limpar
+                </button>
+                <button onClick={() => handleCopyText(logs.map(l => `[${l.time}] [${l.type.toUpperCase()}] ${l.text}`).join('\n'), 'all_logs')} className="btn-secondary" style={{ padding: '6px 12px', fontSize: '0.75rem' }}>
+                  {copiedIndex === 'all_logs' ? <Check size={14} color="#10b981" /> : <Copy size={14} />}
+                  Copiar Logs
+                </button>
+              </div>
+            </div>
+
+            {/* Terminal Box */}
+            <div style={{
+              flex: 1,
+              background: '#05070c',
+              border: '1px solid var(--border-dim)',
+              borderRadius: 'var(--radius-lg)',
+              padding: '16px',
+              fontFamily: 'var(--font-mono)',
+              fontSize: '0.8rem',
+              overflowY: 'auto',
+              boxShadow: 'inset 0 0 20px rgba(0,0,0,0.8)'
+            }}>
+              {logs.map(log => {
+                let color = '#94a3b8';
+                if (log.type === 'success') color = '#34d399';
+                if (log.type === 'warn') color = '#fbbf24';
+                if (log.type === 'error') color = '#fb7185';
+
+                return (
+                  <div key={log.id} style={{ display: 'flex', gap: '10px', marginBottom: '8px', lineHeight: 1.4 }}>
+                    <span style={{ color: '#475569', flexShrink: 0 }}>[{log.time}]</span>
+                    <span style={{ color: color, wordBreak: 'break-word' }}>{log.text}</span>
+                  </div>
+                );
+              })}
+              <div ref={logsEndRef} />
+            </div>
+          </div>
+        )}
       </main>
 
       {/* Settings Modal */}
@@ -992,7 +1360,7 @@ export default function App() {
               {/* Change PIN */}
               <div>
                 <label style={{ fontSize: '0.8rem', color: 'var(--text-muted)', fontWeight: 600, display: 'block', marginBottom: '6px' }}>
-                  PIN de Segurança Atual
+                  Alterar PIN de Segurança
                 </label>
                 <div style={{ display: 'flex', gap: '8px' }}>
                   <input
@@ -1014,7 +1382,12 @@ export default function App() {
                   <button 
                     onClick={() => {
                       const input = document.getElementById('new-pin-input');
-                      if (input) handleChangePin(input.value);
+                      if (input && input.value.length >= 4) {
+                        setPin(input.value);
+                        localStorage.setItem('zinup_pin', input.value);
+                        showNotification('PIN alterado com sucesso!');
+                        addLog('info', 'PIN mestre de segurança atualizado.');
+                      }
                     }}
                     className="btn-secondary"
                   >
