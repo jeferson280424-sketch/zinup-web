@@ -306,7 +306,7 @@ export default function App() {
           model: testModel,
           prompt: 'Responda com exatamente uma palavra: OK.',
           stream: false,
-          options: { temperature: 0.1 }
+          options: { temperature: 0.1, num_ctx: 2048 }
         })
       });
 
